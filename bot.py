@@ -38,18 +38,22 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    user_id = Column(Integer, primary_key=False, nullable=False) # Changed to False, as per composite key below
+    # FIXED: Made both user_id and chat_id part of a composite primary key
+    # This correctly defines a primary key and satisfies the uniqueness requirement
+    user_id = Column(Integer, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    chat_id = Column(Integer, nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint('user_id', 'chat_id', name='uq_user_id_chat_id'),
-    )
+    chat_id = Column(Integer, primary_key=True, nullable=False) # chat_id is now also part of the PK
 
     def __repr__(self):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
                 f"username='{self.username}', chat_id={self.chat_id})>")
+
+# No need for UniqueConstraint if user_id and chat_id are both primary_key=True,
+# as a composite primary key is implicitly unique.
+# __table_args__ = (
+#     UniqueConstraint('user_id', 'chat_id', name='uq_user_id_chat_id'),
+# )
 
 engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 
@@ -89,6 +93,7 @@ async def save_user_to_db(update: Update):
 
     session = Session()
     try:
+        # Query using both user_id and chat_id for uniqueness
         existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
         if not existing_user:
             new_user = User(
@@ -194,12 +199,9 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Prepared {len(members_to_tag_links)} members for tagging in chat {chat_id}.")
 
     # --- Prepare the message content ---
-    # FIXED: Ensure the replied_message_text is always escaped properly.
-    # This addresses the "character '.' is reserved" error.
     final_replied_message_content = escape_markdown_v2(replied_message_text)
     
     initial_command_text = ""
-    # Check if there's text after the /tag command and escape it.
     if update.message.text and ' ' in update.message.text:
         initial_command_text = escape_markdown_v2(update.message.text.split(' ', 1)[1])
     
@@ -213,35 +215,29 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messages_to_send = []
     current_mentions_group = []
     
-    # Calculate base length for the *first* message part
     current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n📢 ".encode('utf-8'))
     
     for mention_link in members_to_tag_links:
         mention_length_bytes = len(mention_link.encode('utf-8'))
         
-        # Check if adding this mention would exceed max message length or max mentions per part
-        # +1 for the space between mentions
         if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
             messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
             
-            # Reset for a new message part
             current_mentions_group = []
             full_message_content_start = "" 
             current_message_base_length_bytes = len("📢 ".encode('utf-8')) 
 
         current_mentions_group.append(mention_link)
 
-    # Add the last accumulated mentions if any
     if current_mentions_group:
-        # If this is the only part, or it's the final part, append it
-        if not messages_to_send and full_message_content_start: # Case: all fits in one initial message
+        if not messages_to_send and full_message_content_start: 
              messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
-        elif messages_to_send: # Case: it's a subsequent message part
+        elif messages_to_send: 
              messages_to_send.append("📢 " + " ".join(current_mentions_group))
-        else: # Edge case: no initial text, just mentions fit in one message
-             messages_to_send.append("📢 " + " ".join(current_mentions_group)) # Should start with 📢 for consistency
+        else: 
+             messages_to_send.append("📢 " + " ".join(current_mentions_group))
 
 
     await feedback_message.edit_text(f"🚀 Sending {len(messages_to_send)} messages with mentions...")
@@ -256,7 +252,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 disable_notification=(i > 0 and len(messages_to_send) > 1) 
             )
             successful_sends += 1
-            await asyncio.sleep(0.1) # Small delay to avoid flood limits
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_send)} for chat {chat_id}: {e}")
 
@@ -278,7 +274,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message and update.message.from_user:
         await save_user_to_db(update)
         await update.message.reply_text(
-            "👋 Hi there! I'm a group tagging bot. \n"
+            "Hi there! I'm a group tagging bot. \n"
             "To use me, reply to any message in a group with `/tag`.\n"
             "I'll resend the message and mention all *known* non-admin members "
             "(those who have messaged in the group while I'm active).\n\n"
@@ -289,7 +285,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
     await update.message.reply_text(
-        "📚 **How to use the Tag Bot:**\n\n"
+        "**How to use the Tag Bot:**\n\n"
         "1. **Add me to your group** and **make me an Administrator** (this helps me exclude admins from tags).\n"
         "2. **Crucial:** Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> **Turn off**.\n"
         "   *Why?* This allows me to see all messages in the group and build a list of members to tag.\n"
@@ -324,10 +320,10 @@ def main() -> None:
         PORT = int(os.environ.get('PORT', 8443))
         webhook_url = f"https://{HEROKU_APP_NAME}.herokuapp.com/{BOT_TOKEN}"
         
-        logger.info(f"🌍 Running in webhook mode on port {PORT} for app {HEROKU_APP_NAME}. Webhook URL: {webhook_url}")
+        logger.info(f"Running in webhook mode on port {PORT} for app {HEROKU_APP_NAME}. Webhook URL: {webhook_url}")
         
         def shutdown_handler(signum, frame):
-            logger.info("👋 Received signal, initiating graceful shutdown...")
+            logger.info("Received signal, initiating graceful shutdown...")
             application.stop()
             sys.exit(0)
 
@@ -342,10 +338,9 @@ def main() -> None:
             allowed_updates=Update.ALL_TYPES
         )
     else:
-        logger.warning("⚠️ HEROKU_APP_NAME environment variable not set. Running in polling mode. "
+        logger.warning("HEROKU_APP_NAME environment variable not set. Running in polling mode. "
                        "This is suitable for local testing or non-Heroku deployment.")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
