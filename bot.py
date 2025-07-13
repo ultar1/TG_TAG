@@ -7,7 +7,7 @@ import asyncio # For better async operations and tasks
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint # FIXED: Added UniqueConstraint import
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 import urllib.parse # For parsing DATABASE_URL
@@ -42,7 +42,7 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    user_id = Column(Integer, primary_key=True, unique=False, nullable=False) # Changed unique to False as user_id might not be unique across groups
+    user_id = Column(Integer, primary_key=True, unique=False, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
     chat_id = Column(Integer, nullable=False) # The group ID where the user was last seen
@@ -57,8 +57,6 @@ class User(Base):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
                 f"username='{self.username}', chat_id={self.chat_id})>")
 
-# Import UniqueConstraint after declarative_base setup
-from sqlalchemy import UniqueConstraint
 
 # Create an engine for PostgreSQL
 # Add connection pooling for better performance in a web environment
@@ -220,35 +218,41 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # --- Prepare the message content ---
     # Escape the original replied message text once
-    escaped_replied_message_text = escape_markdown_v2(replied_message_text)
+    # Apply escape_markdown_v2 to the text that *will be* in the message body.
+    # This fixes the '.' escaping issue if it was in the replied message text.
+    final_replied_message_content = escape_markdown_v2(replied_message_text)
     
     # Prepend the tag trigger mention if it exists to link it to the original replied message
     # And ensure the original message is properly linked to by the tag trigger
-    initial_text_part = ""
-    if update.message.text: # If the command was /tag or /tag@botname
-        # If the command text contains the bot's username, include it in the initial text.
-        # This makes sure if someone typed "/tag some text", that text is also resent.
-        initial_text_part = escape_markdown_v2(update.message.text.split(' ', 1)[1] if ' ' in update.message.text else "")
+    initial_command_text = ""
+    # Check if there's text after the /tag command
+    if update.message.text and ' ' in update.message.text:
+        # Extract the part after the command and escape it
+        initial_command_text = escape_markdown_v2(update.message.text.split(' ', 1)[1])
     
     # Start the message with the original replied message content
-    full_message_content_start = f"{escaped_replied_message_text}\n\n"
-    if initial_text_part:
-        full_message_content_start = f"{initial_text_part}\n\n{full_message_content_start}"
+    # If there was text after /tag, prepend it
+    full_message_content_start = ""
+    if initial_command_text:
+        full_message_content_start += f"{initial_command_text}\n\n"
+    full_message_content_start += f"{final_replied_message_content}\n\n"
+
 
     # --- Pagination Logic for Mentions ---
     messages_to_send = []
     current_mentions_group = []
     
-    # Initial message contains the replied text + intro
-    current_message_base_length = len(full_message_content_start.encode('utf-8')) + len("\n📢 ".encode('utf-8'))
+    # Calculate base length for the *first* message part
+    # Account for the actual byte length of Markdown characters
+    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n📢 ".encode('utf-8'))
     
     for mention_link in members_to_tag_links:
         # Check if adding the next mention exceeds limits
         # Use byte length for more accurate Telegram limit checking
-        mention_length = len(mention_link.encode('utf-8'))
+        mention_length_bytes = len(mention_link.encode('utf-8'))
         
         # Check if adding this mention would exceed max message length or max mentions per part
-        if (current_message_base_length + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length > MAX_MESSAGE_LENGTH or
+        if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
             # If so, finalize the current message part
@@ -256,17 +260,18 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             # Start a new message part
             current_mentions_group = []
-            full_message_content_start = "" # Subsequent messages don't repeat the replied text
-            current_message_base_length = len("\n📢 ".encode('utf-8')) # New message part prefix length
-
+            full_message_content_start = "" # Subsequent messages don't repeat the replied text or command text
+            current_message_base_length_bytes = len("📢 ".encode('utf-8')) # New message part prefix length
+            
         current_mentions_group.append(mention_link)
 
     # Add the last accumulated mentions if any
     if current_mentions_group:
         if not messages_to_send: # If all mentions fit in the first message
              messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
-        else: # Append to existing messages
+        else: # Append to existing messages (start with "📢 " for consistency if not first part)
              messages_to_send.append("📢 " + " ".join(current_mentions_group))
+
 
     # Edit feedback message to indicate sending phase
     await feedback_message.edit_text(f"🚀 Sending {len(messages_to_send)} messages with mentions...")
