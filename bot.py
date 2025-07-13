@@ -7,7 +7,7 @@ import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint # Ensure UniqueConstraint is imported
+from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 import urllib.parse
@@ -20,14 +20,15 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME")
+# HEROKU_APP_NAME is no longer strictly needed for polling, but keeping it as an env var is harmless.
+# HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME") 
 
 if not BOT_TOKEN:
-    logger.critical("❌ BOT_TOKEN environment variable not set. Exiting.")
+    logger.critical("BOT_TOKEN environment variable not set. Exiting.")
     sys.exit(1)
 
 if not DATABASE_URL:
-    logger.critical("❌ DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
     sys.exit(1)
 
 if DATABASE_URL.startswith("postgres://"):
@@ -38,30 +39,22 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    # FIXED: Made both user_id and chat_id part of a composite primary key
-    # This correctly defines a primary key and satisfies the uniqueness requirement
     user_id = Column(Integer, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    chat_id = Column(Integer, primary_key=True, nullable=False) # chat_id is now also part of the PK
+    chat_id = Column(Integer, primary_key=True, nullable=False)
 
     def __repr__(self):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
                 f"username='{self.username}', chat_id={self.chat_id})>")
 
-# No need for UniqueConstraint if user_id and chat_id are both primary_key=True,
-# as a composite primary key is implicitly unique.
-# __table_args__ = (
-#     UniqueConstraint('user_id', 'chat_id', name='uq_user_id_chat_id'),
-# )
-
 engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 
 try:
     Base.metadata.create_all(engine)
-    logger.info("✅ Database tables checked/created successfully.")
+    logger.info("Database tables checked/created successfully.")
 except OperationalError as e:
-    logger.critical(f"❌ Failed to connect to database or create tables: {e}. Exiting.")
+    logger.critical(f"Failed to connect to database or create tables: {e}. Exiting.")
     sys.exit(1)
 
 Session = sessionmaker(bind=engine)
@@ -93,7 +86,6 @@ async def save_user_to_db(update: Update):
 
     session = Session()
     try:
-        # Query using both user_id and chat_id for uniqueness
         existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
         if not existing_user:
             new_user = User(
@@ -136,7 +128,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     if not update.message.reply_to_message:
         await update.message.reply_text(
-            "⚠️ Please reply to a message with `/tag` to use this command.",
+            "Please reply to a message with `/tag` to use this command.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -147,13 +139,13 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not replied_message_text:
         await update.message.reply_text(
-            "⚠️ The replied message does not contain any text or caption to resend.",
+            "The replied message does not contain any text or caption to resend.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
 
     feedback_message = await update.message.reply_text(
-        "⚙️ Fetching user list and preparing mentions, please wait...",
+        "Fetching user list and preparing mentions, please wait...",
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -164,7 +156,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"DB: Found {len(all_known_users_in_chat)} known users for chat {chat_id}.")
     except Exception as e:
         logger.error(f"DB: Error querying users for chat {chat_id}: {e}")
-        await feedback_message.edit_text("❌ An error occurred while fetching known users from the database. Please try again later.")
+        await feedback_message.edit_text("An error occurred while fetching known users from the database. Please try again later.")
         return
     finally:
         session.close()
@@ -190,7 +182,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not members_to_tag_links:
         await feedback_message.edit_text(
-            "⚠️ No known non-admin members to tag in this group. "
+            "No known non-admin members to tag in this group. "
             "Users must send a message first to be added to the tag list, and ensure bot privacy is off.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -215,7 +207,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messages_to_send = []
     current_mentions_group = []
     
-    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n📢 ".encode('utf-8'))
+    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n ".encode('utf-8')) # Removed emoji
     
     for mention_link in members_to_tag_links:
         mention_length_bytes = len(mention_link.encode('utf-8'))
@@ -223,24 +215,24 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
-            messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
+            messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) # Removed emoji
             
             current_mentions_group = []
             full_message_content_start = "" 
-            current_message_base_length_bytes = len("📢 ".encode('utf-8')) 
+            current_message_base_length_bytes = len(" ".encode('utf-8')) # Removed emoji
 
         current_mentions_group.append(mention_link)
 
     if current_mentions_group:
         if not messages_to_send and full_message_content_start: 
-             messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
+             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) # Removed emoji
         elif messages_to_send: 
-             messages_to_send.append("📢 " + " ".join(current_mentions_group))
+             messages_to_send.append(" " + " ".join(current_mentions_group)) # Removed emoji
         else: 
-             messages_to_send.append("📢 " + " ".join(current_mentions_group))
+             messages_to_send.append(" " + " ".join(current_mentions_group)) # Removed emoji
 
 
-    await feedback_message.edit_text(f"🚀 Sending {len(messages_to_send)} messages with mentions...")
+    await feedback_message.edit_text(f"Sending {len(messages_to_send)} messages with mentions...")
 
     successful_sends = 0
     for i, message_text in enumerate(messages_to_send):
@@ -254,16 +246,16 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             successful_sends += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_send)} for chat {chat_id}: {e}")
+            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
 
     if successful_sends == len(messages_to_send):
         await feedback_message.edit_text(
-            f"✅ Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members.",
+            f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
         await feedback_message.edit_text(
-            f"⚠️ Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. "
+            f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. "
             "Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -315,32 +307,11 @@ def main() -> None:
     # Also record users who interact with the bot in private chats
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, record_user_message))
 
-    # Heroku deployment specific logic (webhooks)
-    if HEROKU_APP_NAME:
-        PORT = int(os.environ.get('PORT', 8443))
-        webhook_url = f"https://{HEROKU_APP_NAME}.herokuapp.com/{BOT_TOKEN}"
-        
-        logger.info(f"Running in webhook mode on port {PORT} for app {HEROKU_APP_NAME}. Webhook URL: {webhook_url}")
-        
-        def shutdown_handler(signum, frame):
-            logger.info("Received signal, initiating graceful shutdown...")
-            application.stop()
-            sys.exit(0)
-
-        signal.signal(signal.SIGTERM, shutdown_handler)
-        signal.signal(signal.SIGINT, shutdown_handler)
-
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=webhook_url,
-            allowed_updates=Update.ALL_TYPES
-        )
-    else:
-        logger.warning("HEROKU_APP_NAME environment variable not set. Running in polling mode. "
-                       "This is suitable for local testing or non-Heroku deployment.")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # For polling, simply run the application without webhook specifics
+    # IMPORTANT: If deploying to Heroku, this should be run on a WORKER dyno, NOT a WEB dyno.
+    # Your Procfile should be something like: worker: python bot.py
+    logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
