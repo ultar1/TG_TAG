@@ -2,29 +2,26 @@ import logging
 import os
 import sys
 import signal
-import asyncio # For better async operations and tasks
+import asyncio
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint # FIXED: Added UniqueConstraint import
+from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint # Ensure UniqueConstraint is imported
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-import urllib.parse # For parsing DATABASE_URL
+import urllib.parse
 
 # --- Configuration ---
-# Set up logging at the beginning
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME")
 
-# Validate environment variables
 if not BOT_TOKEN:
     logger.critical("❌ BOT_TOKEN environment variable not set. Exiting.")
     sys.exit(1)
@@ -33,7 +30,6 @@ if not DATABASE_URL:
     logger.critical("❌ DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
     sys.exit(1)
 
-# Heroku's DATABASE_URL might be 'postgres://', but SQLAlchemy expects 'postgresql://'
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -42,13 +38,11 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    user_id = Column(Integer, primary_key=True, unique=False, nullable=False)
+    user_id = Column(Integer, primary_key=False, nullable=False) # Changed to False, as per composite key below
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    chat_id = Column(Integer, nullable=False) # The group ID where the user was last seen
+    chat_id = Column(Integer, nullable=False)
 
-    # Added composite primary key for user_id + chat_id to ensure uniqueness per group
-    # This prevents errors if the same user is in multiple groups where the bot is active
     __table_args__ = (
         UniqueConstraint('user_id', 'chat_id', name='uq_user_id_chat_id'),
     )
@@ -57,13 +51,10 @@ class User(Base):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
                 f"username='{self.username}', chat_id={self.chat_id})>")
 
-
-# Create an engine for PostgreSQL
-# Add connection pooling for better performance in a web environment
 engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 
 try:
-    Base.metadata.create_all(engine) # Create tables if they don't exist
+    Base.metadata.create_all(engine)
     logger.info("✅ Database tables checked/created successfully.")
 except OperationalError as e:
     logger.critical(f"❌ Failed to connect to database or create tables: {e}. Exiting.")
@@ -73,19 +64,15 @@ Session = sessionmaker(bind=engine)
 # --- End Database Setup ---
 
 # Constants for message splitting
-MAX_MENTIONS_PER_MESSAGE = 50 # Telegram's effective limit for entities is usually around 100
-MAX_MESSAGE_LENGTH = 4096 # Telegram's max message length (bytes for text, not entities)
+MAX_MENTIONS_PER_MESSAGE = 50
+MAX_MESSAGE_LENGTH = 4096
 
 # --- Helper Functions ---
 def escape_markdown_v2(text: str) -> str:
     """Escapes common MarkdownV2 special characters."""
     if not isinstance(text, str):
-        return "" # Handle non-string inputs gracefully
+        return ""
     
-    # Characters that need to be escaped in MarkdownV2
-    # _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
-    # Backslash itself needs to be escaped
-    # This list is more comprehensive and safer
     special_chars = r'_*[]()~`>#+-=|{}.!'
     escaped_text = text.replace('\\', '\\\\')
     for char in special_chars:
@@ -97,13 +84,11 @@ async def save_user_to_db(update: Update):
     user = update.message.from_user
     chat_id = update.message.chat_id
 
-    # Avoid processing messages from channels or private chats not meant for user tracking
     if update.message.chat.type not in ["group", "supergroup"]:
         return
 
     session = Session()
     try:
-        # Use user_id AND chat_id to query, as a user can be in multiple groups
         existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
         if not existing_user:
             new_user = User(
@@ -116,7 +101,6 @@ async def save_user_to_db(update: Update):
             session.commit()
             logger.info(f"DB: Added user {user.id} ({user.first_name}) for chat {chat_id}")
         else:
-            # Update user info if it changed (e.g., first_name, username)
             if (existing_user.first_name != user.first_name or
                 existing_user.username != user.username):
                 existing_user.first_name = user.first_name
@@ -125,7 +109,7 @@ async def save_user_to_db(update: Update):
                 logger.info(f"DB: Updated user {user.id} ({user.first_name}) for chat {chat_id}")
 
     except IntegrityError:
-        session.rollback() # Handle potential race conditions where user is added simultaneously
+        session.rollback()
         logger.warning(f"DB: User {user.id} already exists (race condition) for chat {chat_id}. Rolling back.")
     except Exception as e:
         session.rollback()
@@ -163,7 +147,6 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Acknowledge the command quickly
     feedback_message = await update.message.reply_text(
         "⚙️ Fetching user list and preparing mentions, please wait...",
         parse_mode=ParseMode.MARKDOWN_V2
@@ -182,28 +165,22 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         session.close()
 
     members_to_tag_links = []
-    current_chat_administrators_ids = set() # Renamed for clarity and to avoid conflict
+    current_chat_administrators_ids = set()
 
     try:
         administrators = await context.bot.get_chat_administrators(chat_id)
         for admin in administrators:
             current_chat_administrators_ids.add(admin.user.id)
-            # Ensure the bot itself is also excluded from tagging lists if it's an admin
             if admin.user.id == context.bot.id: 
                 current_chat_administrators_ids.add(admin.user.id)
         logger.info(f"Telegram API: Found {len(current_chat_administrators_ids)} administrators for chat {chat_id}.")
     except Exception as e:
         logger.warning(f"Telegram API: Could not retrieve chat administrators for chat {chat_id}: {e}. Admins might not be excluded from tagging if this fails or bot is not admin.")
-        # We proceed without admin exclusion if fetching admins fails
 
     for user_obj in all_known_users_in_chat:
         if user_obj.user_id not in current_chat_administrators_ids:
             mention_name = user_obj.first_name if user_obj.first_name else "A User"
-            
-            # CRITICAL FIX: Escape the mention_name before putting it into the Markdown link
             escaped_mention_name = escape_markdown_v2(mention_name)
-            
-            # Construct the mention link using tg://user?id=
             members_to_tag_links.append(f"[{escaped_mention_name}](tg://user?id={user_obj.user_id})")
 
     if not members_to_tag_links:
@@ -217,21 +194,15 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Prepared {len(members_to_tag_links)} members for tagging in chat {chat_id}.")
 
     # --- Prepare the message content ---
-    # Escape the original replied message text once
-    # Apply escape_markdown_v2 to the text that *will be* in the message body.
-    # This fixes the '.' escaping issue if it was in the replied message text.
+    # FIXED: Ensure the replied_message_text is always escaped properly.
+    # This addresses the "character '.' is reserved" error.
     final_replied_message_content = escape_markdown_v2(replied_message_text)
     
-    # Prepend the tag trigger mention if it exists to link it to the original replied message
-    # And ensure the original message is properly linked to by the tag trigger
     initial_command_text = ""
-    # Check if there's text after the /tag command
+    # Check if there's text after the /tag command and escape it.
     if update.message.text and ' ' in update.message.text:
-        # Extract the part after the command and escape it
         initial_command_text = escape_markdown_v2(update.message.text.split(' ', 1)[1])
     
-    # Start the message with the original replied message content
-    # If there was text after /tag, prepend it
     full_message_content_start = ""
     if initial_command_text:
         full_message_content_start += f"{initial_command_text}\n\n"
@@ -243,37 +214,36 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_mentions_group = []
     
     # Calculate base length for the *first* message part
-    # Account for the actual byte length of Markdown characters
     current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n📢 ".encode('utf-8'))
     
     for mention_link in members_to_tag_links:
-        # Check if adding the next mention exceeds limits
-        # Use byte length for more accurate Telegram limit checking
         mention_length_bytes = len(mention_link.encode('utf-8'))
         
         # Check if adding this mention would exceed max message length or max mentions per part
+        # +1 for the space between mentions
         if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
-            # If so, finalize the current message part
             messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
             
-            # Start a new message part
+            # Reset for a new message part
             current_mentions_group = []
-            full_message_content_start = "" # Subsequent messages don't repeat the replied text or command text
-            current_message_base_length_bytes = len("📢 ".encode('utf-8')) # New message part prefix length
-            
+            full_message_content_start = "" 
+            current_message_base_length_bytes = len("📢 ".encode('utf-8')) 
+
         current_mentions_group.append(mention_link)
 
     # Add the last accumulated mentions if any
     if current_mentions_group:
-        if not messages_to_send: # If all mentions fit in the first message
+        # If this is the only part, or it's the final part, append it
+        if not messages_to_send and full_message_content_start: # Case: all fits in one initial message
              messages_to_send.append(full_message_content_start + "📢 " + " ".join(current_mentions_group))
-        else: # Append to existing messages (start with "📢 " for consistency if not first part)
+        elif messages_to_send: # Case: it's a subsequent message part
              messages_to_send.append("📢 " + " ".join(current_mentions_group))
+        else: # Edge case: no initial text, just mentions fit in one message
+             messages_to_send.append("📢 " + " ".join(current_mentions_group)) # Should start with 📢 for consistency
 
 
-    # Edit feedback message to indicate sending phase
     await feedback_message.edit_text(f"🚀 Sending {len(messages_to_send)} messages with mentions...")
 
     successful_sends = 0
@@ -283,15 +253,12 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 chat_id=chat_id,
                 text=message_text,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                # Optional: Disable notification for subsequent messages if many
                 disable_notification=(i > 0 and len(messages_to_send) > 1) 
             )
             successful_sends += 1
-            # Add a small delay to respect API rate limits for sending multiple messages
             await asyncio.sleep(0.1) # Small delay to avoid flood limits
         except Exception as e:
             logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_send)} for chat {chat_id}: {e}")
-            # Do not stop, try to send remaining parts
 
     if successful_sends == len(messages_to_send):
         await feedback_message.edit_text(
@@ -309,7 +276,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update) # Record user even if they start bot in private chat
+        await save_user_to_db(update)
         await update.message.reply_text(
             "👋 Hi there! I'm a group tagging bot. \n"
             "To use me, reply to any message in a group with `/tag`.\n"
@@ -355,26 +322,24 @@ def main() -> None:
     # Heroku deployment specific logic (webhooks)
     if HEROKU_APP_NAME:
         PORT = int(os.environ.get('PORT', 8443))
-        # Ensure the webhook URL is correctly formed with the app name and bot token
         webhook_url = f"https://{HEROKU_APP_NAME}.herokuapp.com/{BOT_TOKEN}"
         
         logger.info(f"🌍 Running in webhook mode on port {PORT} for app {HEROKU_APP_NAME}. Webhook URL: {webhook_url}")
         
-        # Add graceful shutdown for Heroku
         def shutdown_handler(signum, frame):
             logger.info("👋 Received signal, initiating graceful shutdown...")
             application.stop()
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, shutdown_handler)
-        signal.signal(signal.SIGINT, shutdown_handler) # For local Ctrl+C
+        signal.signal(signal.SIGINT, shutdown_handler)
 
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=BOT_TOKEN, # Use token as url_path for security
+            url_path=BOT_TOKEN,
             webhook_url=webhook_url,
-            allowed_updates=Update.ALL_TYPES # Process all update types
+            allowed_updates=Update.ALL_TYPES
         )
     else:
         logger.warning("⚠️ HEROKU_APP_NAME environment variable not set. Running in polling mode. "
@@ -383,3 +348,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
