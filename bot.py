@@ -70,7 +70,11 @@ def escape_markdown_v2(text: str) -> str:
     if not isinstance(text, str):
         return ""
     
+    # Correct list of special characters for MarkdownV2, including backslash itself to be handled first.
+    # We already handle backslash explicitly first, so no need to put it here.
     special_chars = r'_*[]()~`>#+-=|{}.!'
+    
+    # Process backslashes first, then other special characters
     escaped_text = text.replace('\\', '\\\\')
     for char in special_chars:
         escaped_text = escaped_text.replace(char, f'\\{char}')
@@ -127,8 +131,9 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     Splits messages if too many mentions.
     """
     if not update.message.reply_to_message:
+        # FIXED: Escaped static string
         await update.message.reply_text(
-            "Please reply to a message with `/tag` to use this command.",
+            escape_markdown_v2("Please reply to a message with `/tag` to use this command."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -138,14 +143,16 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     replied_message_text = replied_message.text or replied_message.caption
 
     if not replied_message_text:
+        # FIXED: Escaped static string
         await update.message.reply_text(
-            "The replied message does not contain any text or caption to resend.",
+            escape_markdown_v2("The replied message does not contain any text or caption to resend."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
 
+    # FIXED: Escaped static string
     feedback_message = await update.message.reply_text(
-        "Fetching user list and preparing mentions, please wait...",
+        escape_markdown_v2("Fetching user list and preparing mentions, please wait..."),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -156,7 +163,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"DB: Found {len(all_known_users_in_chat)} known users for chat {chat_id}.")
     except Exception as e:
         logger.error(f"DB: Error querying users for chat {chat_id}: {e}")
-        await feedback_message.edit_text("An error occurred while fetching known users from the database. Please try again later.")
+        # FIXED: Escaped static string
+        await feedback_message.edit_text(escape_markdown_v2("An error occurred while fetching known users from the database. Please try again later."))
         return
     finally:
         session.close()
@@ -181,9 +189,9 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             members_to_tag_links.append(f"[{escaped_mention_name}](tg://user?id={user_obj.user_id})")
 
     if not members_to_tag_links:
+        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            "No known non-admin members to tag in this group. "
-            "Users must send a message first to be added to the tag list, and ensure bot privacy is off.",
+            escape_markdown_v2("No known non-admin members to tag in this group. Users must send a message first to be added to the tag list, and ensure bot privacy is off."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -207,7 +215,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messages_to_send = []
     current_mentions_group = []
     
-    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n ".encode('utf-8')) # Removed emoji
+    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n ".encode('utf-8'))
     
     for mention_link in members_to_tag_links:
         mention_length_bytes = len(mention_link.encode('utf-8'))
@@ -215,24 +223,26 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
-            messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) # Removed emoji
+            # This part should be safe now because full_message_content_start is escaped
+            messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) 
             
             current_mentions_group = []
             full_message_content_start = "" 
-            current_message_base_length_bytes = len(" ".encode('utf-8')) # Removed emoji
+            current_message_base_length_bytes = len(" ".encode('utf-8')) 
 
         current_mentions_group.append(mention_link)
 
     if current_mentions_group:
         if not messages_to_send and full_message_content_start: 
-             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) # Removed emoji
+             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group))
         elif messages_to_send: 
-             messages_to_send.append(" " + " ".join(current_mentions_group)) # Removed emoji
+             messages_to_send.append(" " + " ".join(current_mentions_group))
         else: 
-             messages_to_send.append(" " + " ".join(current_mentions_group)) # Removed emoji
+             messages_to_send.append(" " + " ".join(current_mentions_group))
 
 
-    await feedback_message.edit_text(f"Sending {len(messages_to_send)} messages with mentions...")
+    # FIXED: Escaped static string
+    await feedback_message.edit_text(escape_markdown_v2(f"Sending {len(messages_to_send)} messages with mentions..."))
 
     successful_sends = 0
     for i, message_text in enumerate(messages_to_send):
@@ -249,14 +259,15 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
 
     if successful_sends == len(messages_to_send):
+        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members.",
+            escape_markdown_v2(f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
+        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. "
-            "Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off.",
+            escape_markdown_v2(f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -265,19 +276,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
         await save_user_to_db(update)
+        # FIXED: Escaped static string
         await update.message.reply_text(
-            "Hi there! I'm a group tagging bot. \n"
+            escape_markdown_v2("Hi there! I'm a group tagging bot. \n"
             "To use me, reply to any message in a group with `/tag`.\n"
             "I'll resend the message and mention all *known* non-admin members "
             "(those who have messaged in the group while I'm active).\n\n"
-            "Make sure to turn off Group Privacy for me via @BotFather!",
+            "Make sure to turn off Group Privacy for me via @BotFather!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
+    # FIXED: Escaped static string. Note: the `**` for bold is Markdown itself, not special char.
     await update.message.reply_text(
-        "**How to use the Tag Bot:**\n\n"
+        escape_markdown_v2("**How to use the Tag Bot:**\n\n"
         "1. **Add me to your group** and **make me an Administrator** (this helps me exclude admins from tags).\n"
         "2. **Crucial:** Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> **Turn off**.\n"
         "   *Why?* This allows me to see all messages in the group and build a list of members to tag.\n"
@@ -287,7 +300,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
         "**Limitations:**\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
-        "- Very large groups might experience delays or split messages due to Telegram's limits.",
+        "- Very large groups might experience delays or split messages due to Telegram's limits."),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
