@@ -6,6 +6,8 @@ import uuid # For unique filenames
 import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
+import subprocess # NEW: For running gallery-dl
+from urllib.parse import urlparse, parse_qs # NEW: For URL parsing
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -35,6 +37,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True) # Create if it doesn't exist
 # Telegram's direct video upload limit (50 MB)
 TELEGRAM_VIDEO_LIMIT_MB = 50
 TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
+TELEGRAM_DOCUMENT_LIMIT_BYTES = 2 * 1024 * 1024 * 1024 # 2 GB limit for documents
 
 # --- Admin ID for notifications ---
 ADMIN_ID = 7302005705 # Your specified admin ID
@@ -502,17 +505,60 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
+async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_url: str, temp_dir: str) -> list[str]:
+    """
+    Attempts to download TikTok image posts using gallery-dl.
+    Returns a list of downloaded file paths.
+    """
+    logger.info(f"Attempting gallery-dl for TikTok image URL: {content_url}")
+    
+    # gallery-dl command: -o for output template, -d for download directory
+    # %(filename)s.%(extension)s ensures unique filenames
+    command = [
+        'gallery-dl',
+        content_url,
+        '-o', os.path.join(temp_dir, '%(filename)s.%(extension)s'),
+        '-d', temp_dir
+    ]
+
+    try:
+        # Run gallery-dl as a subprocess
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        logger.info(f"gallery-dl stdout: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"gallery-dl stderr: {result.stderr}")
+        
+        # After successful download, find all downloaded files in the temp directory
+        downloaded_files = [
+            os.path.join(temp_dir, f) for f in os.listdir(temp_dir) 
+            if os.path.isfile(os.path.join(temp_dir, f)) and not f.startswith('.') # Ignore hidden files
+        ]
+        
+        if not downloaded_files:
+            logger.warning(f"gallery-dl reported success but no files found in {temp_dir}")
+            raise RuntimeError("gallery-dl did not download any files.")
+        
+        return downloaded_files
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"gallery-dl failed with error code {e.returncode}: {e.stderr}")
+        raise RuntimeError(f"gallery-dl error: {e.stderr}")
+    except FileNotFoundError:
+        logger.error("gallery-dl command not found. Ensure it's installed and in PATH.")
+        raise RuntimeError("gallery-dl is not installed on the server.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during gallery-dl execution: {e}")
+        raise RuntimeError(f"An unexpected error occurred during image download: {e}")
 
 # --- Universal Video/Audio Download Handler ---
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str, content_url: str) -> None:
     """
-    Downloads content from a given URL using yt-dlp and sends it.
+    Downloads content from a given URL using yt-dlp (for video/audio) or gallery-dl (for images).
     Args:
         platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube, 'SoundCloud') for messaging.
         content_url (str): The URL to download.
     """
-    # save_user_to_db already called by record_user_message before this function
     
     # Basic URL validation specific to platform
     valid_platforms = {
@@ -523,7 +569,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be"], # Simplified YouTube domains for common URLs
+        "youtube": ["youtube.com", "youtu.be", "youtube.com"], # Added youtube.com for common URLs
         "soundcloud": "soundcloud.com"
     }
     
@@ -582,168 +628,181 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
 
     animation_task = asyncio.create_task(animate_loading())
 
-    downloaded_file_path = None
+    downloaded_files_list = [] # This will hold paths to all downloaded files
+
     try:
-        ydl_opts = {
-            'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
-            'noplaylist': True,
-            'verbose': False, # Changed to False for cleaner logs in production
-            'logger': logger,
-            'no_warnings': True,
-            'postprocessors': [{ # Use FFmpeg to ensure compatible MP4 for Telegram
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }],
-        }
-
-        # Special handling for SoundCloud (audio only)
-        if platform_key == "soundcloud":
-            ydl_opts['format'] = 'bestaudio/best' # Prioritize audio
-            # Remove video postprocessor for audio only
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
-        else: # For video platforms
-            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-
-        # Optional: Add cookies.txt for platforms like Instagram/Facebook/YouTube that sometimes require it
-        # This requires you to create a 'cookies.txt' file in your bot's root directory
-        # containing cookies exported from a logged-in browser session.
-        # Use with caution, especially for public bots, due to security/privacy.
-        if os.path.exists('cookies.txt'):
-            ydl_opts['cookiefile'] = 'cookies.txt'
-            logger.info("Using cookies.txt for download.")
-        else:
-            logger.info("No cookies.txt found. Proceeding without cookies.")
-
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(content_url, download=False) # Get info first
+        # --- TikTok Specific Logic for Images vs Videos ---
+        if platform_key == "tiktok":
+            # Parse URL to check for specific indicators of image posts
+            parsed_url = urlparse(content_url)
+            query_params = parse_qs(parsed_url.query)
             
-            if info_dict.get('is_live'):
-                animation_running = False # Stop animation
-                if not animation_task.done(): animation_task.cancel()
-                try: await animation_task # Ensure the animation task finishes (or is cancelled)
-                except asyncio.CancelledError: pass
+            # Check for /photo/ in path or aweme_type=150 in query
+            if "/photo/" in parsed_url.path or query_params.get('aweme_type', [''])[0] == '150':
+                logger.info(f"TikTok URL detected as potential image post, attempting gallery-dl: {content_url}")
+                downloaded_files_list = await try_download_tiktok_image(context, content_url, temp_dir_name)
+            else:
+                logger.info(f"TikTok URL detected as potential video, attempting yt-dlp: {content_url}")
+                # Original yt-dlp logic for TikTok videos
+                ydl_opts = {
+                    'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
+                    'noplaylist': True,
+                    'verbose': False,
+                    'logger': logger,
+                    'no_warnings': True,
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }],
+                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                }
+                if os.path.exists('cookies.txt'):
+                    ydl_opts['cookiefile'] = 'cookies.txt'
+                    logger.info("Using cookies.txt for download.")
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info_dict = ydl.extract_info(content_url, download=True) # Download directly here
+                    
+                downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
+                if not downloaded_files_list:
+                    raise FileNotFoundError("yt-dlp did not download any file for TikTok video.")
+        else:
+            # --- Existing yt-dlp logic for other platforms (and fallback for TikTok) ---
+            ydl_opts = {
+                'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
+                'noplaylist': True,
+                'verbose': False, # Changed to False for cleaner logs in production
+                'logger': logger,
+                'no_warnings': True,
+                'postprocessors': [{ # Use FFmpeg to ensure compatible MP4 for Telegram
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }],
+            }
+
+            # Special handling for SoundCloud (audio only)
+            if platform_key == "soundcloud":
+                ydl_opts['format'] = 'bestaudio/best' # Prioritize audio
+                # Remove video postprocessor for audio only
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }]
+            else: # For video platforms
+                ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+
+            if os.path.exists('cookies.txt'):
+                ydl_opts['cookiefile'] = 'cookies.txt'
+                logger.info("Using cookies.txt for download.")
+
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(content_url, download=True) # Changed to download=True
+                
+            downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
+            if not downloaded_files_list:
+                raise FileNotFoundError("yt-dlp did not download any file or file not found in temp directory.")
+        
+        # Ensure animation stops before sending files
+        animation_running = False 
+        if not animation_task.done(): animation_task.cancel()
+        try: await animation_task 
+        except asyncio.CancelledError: pass
+
+        # --- Send the downloaded files ---
+        if not downloaded_files_list:
+            await processing_message.edit_text(
+                escape_markdown_v2(f"Failed to download any content from {platform} for the provided URL."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+
+        # Sort files to ensure a consistent order for carousels
+        downloaded_files_list.sort()
+
+        sent_any_file = False
+        for file_path in downloaded_files_list:
+            file_size = os.path.getsize(file_path) # in bytes
+            file_name = os.path.basename(file_path)
+            
+            # Determine if it's an image
+            is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp'))
+            
+            if is_image:
                 await processing_message.edit_text(
-                    escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
+                    escape_markdown_v2(f"Image downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait... "),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
-                return
-            
-            # Use 'actual_ext' if available, otherwise 'ext'
-            file_extension = info_dict.get('actual_ext', info_dict.get('ext', 'mp4'))
-            # For audio, ensure it's mp3 or m4a if extracted
-            if platform_key == "soundcloud" and 'mp3' not in file_extension:
-                file_extension = 'mp3' # Force mp3 if yt-dlp might suggest something else
-
-            # Some platforms might return a generic ID, use title if available for filename to be more descriptive
-            suggested_filename_base = info_dict.get('title', info_dict.get('id', 'content'))
-            # Clean filename from problematic characters (e.g., / \ : * ? " < > |)
-            suggested_filename_base = "".join(c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-            # Truncate filename if too long for filesystem limits (e.g., 255 chars)
-            if len(suggested_filename_base) > 150: # Arbitrary but reasonable limit
-                suggested_filename_base = suggested_filename_base[:150]
-            
-            suggested_filename = f"{suggested_filename_base}.{file_extension}"
-            downloaded_file_path_template = os.path.join(temp_dir_name, suggested_filename) # Use this for outtmpl
-            
-            # Re-configure outtmpl with the cleaned filename template
-            ydl_opts['outtmpl'] = downloaded_file_path_template
-
-            logger.info(f"Attempting to download {content_url} from {platform} to {downloaded_file_path_template}")
-            
-            # Re-initialize YDL with updated opts, or just download if only outtmpl changed
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
-                 ydl_download.download([content_url])
-            
-            logger.info(f"Download initiated via yt-dlp to temp directory.")
-
-        # Find the actual downloaded file in the temp directory after download
-        downloaded_files = [f for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
-        if not downloaded_files:
-            raise FileNotFoundError("yt-dlp did not download any file or file not found in temp directory.")
-        
-        # Take the first file, which should be the main content
-        downloaded_file_path = os.path.join(temp_dir_name, downloaded_files[0])
-
-
-        file_size = os.path.getsize(downloaded_file_path) # in bytes
-        logger.info(f"Downloaded file size: {file_size / (1024*1024):.2f} MB")
-
-        # Get content title for caption
-        content_title = escape_markdown_v2(info_dict.get('title', f'{platform} Content'))
-        
-        # Decide whether to send as video/audio or document based on platform and size
-        if platform_key == "soundcloud": # Always send audio as document
-            animation_running = False # Stop animation
-            if not animation_task.done(): animation_task.cancel()
-            try: await animation_task # Ensure the animation task finishes (or is cancelled)
-            except asyncio.CancelledError: pass
-            await processing_message.edit_text(
-                escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            with open(downloaded_file_path, 'rb') as audio_file:
-                await context.bot.send_document(
-                    chat_id=update.message.chat_id,
-                    document=InputFile(audio_file, filename=os.path.basename(downloaded_file_path)),
-                    caption=f"Here's your {platform} audio: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    read_timeout=300,
-                    write_timeout=300,
-                    connect_timeout=300
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_document(
+                        chat_id=update.message.chat_id,
+                        document=InputFile(f, filename=file_name),
+                        caption=f"Here's your {platform} image: {file_name}",
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        read_timeout=300,
+                        write_timeout=300,
+                        connect_timeout=300
+                    )
+            elif platform_key == "soundcloud" or file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
+                # Send as document if audio or larger than 50MB (Telegram's send_video limit)
+                await processing_message.edit_text(
+                    escape_markdown_v2(f"Content downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
-        elif file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
-            # Send as document if larger than 50MB (Telegram's send_video limit)
-            animation_running = False # Stop animation
-            if not animation_task.done(): animation_task.cancel()
-            try: await animation_task # Ensure the animation task finishes (or is cancelled)
-            except asyncio.CancelledError: pass
-            await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            with open(downloaded_file_path, 'rb') as video_file:
-                await context.bot.send_document(
-                    chat_id=update.message.chat_id,
-                    document=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
-                    caption=f"Here's your {platform} video: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    read_timeout=300, # Increased timeout for large uploads
-                    write_timeout=300, # Increased timeout for large uploads
-                    connect_timeout=300
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_document(
+                        chat_id=update.message.chat_id,
+                        document=InputFile(f, filename=file_name), # Use actual filename
+                        caption=f"Here's your {platform} content: {file_name}",
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        read_timeout=300, # Increased timeout for large uploads
+                        write_timeout=300, # Increased timeout for large uploads
+                        connect_timeout=300
+                    )
+            else:
+                # Send as video if smaller than 50MB
+                await processing_message.edit_text(
+                    escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
-        else:
-            # Send as video if smaller than 50MB
-            animation_running = False # Stop animation
-            if not animation_task.done(): animation_task.cancel()
-            try: await animation_task # Ensure the animation task finishes (or is cancelled)
-            except asyncio.CancelledError: pass
-            await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            with open(downloaded_file_path, 'rb') as video_file:
-                await context.bot.send_video(
-                    chat_id=update.message.chat_id,
-                    video=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
-                    caption=f"Here's your {platform} video: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    supports_streaming=True, # Allows streaming before full download
-                    read_timeout=300, 
-                    write_timeout=300,
-                    connect_timeout=300
-                )
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_video(
+                        chat_id=update.message.chat_id,
+                        video=InputFile(f, filename=file_name), # Use actual filename
+                        caption=f"Here's your {platform} video: {file_name}",
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        supports_streaming=True, # Allows streaming before full download
+                        read_timeout=300, 
+                        write_timeout=300,
+                        connect_timeout=300
+                    )
+            sent_any_file = True
 
         await processing_message.delete() # Remove the "processing" message
-        await update.message.reply_text(
-            escape_markdown_v2(f"Your {platform} content has been sent successfully! Enjoy!"),
+        if sent_any_file:
+            await update.message.reply_text(
+                escape_markdown_v2(f"Your {platform} content has been sent successfully! Enjoy!"),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        else:
+            await update.message.reply_text(
+                escape_markdown_v2(f"Finished processing, but no content was sent. The download might have failed or resulted in an unexpected file type."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+
+
+    except RuntimeError as e: # Catch errors specifically raised by try_download_tiktok_image or other parts
+        logger.error(f"Download Error for {content_url} ({platform}): {e}")
+        animation_running = False 
+        if not animation_task.done(): animation_task.cancel()
+        try: await animation_task 
+        except asyncio.CancelledError: pass
+        await processing_message.edit_text(
+            escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(str(e))}`\n\n"
+                               "Please ensure the link is public and valid. Try again later."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
-
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp download error for {content_url} ({platform}): {e}")
         error_message = str(e)
@@ -754,7 +813,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif "Unsupported URL" in error_message:
             # Enhanced message for TikTok specifically
             if platform_key == "tiktok":
-                user_facing_error = "This URL is not supported by the downloader for TikTok. *Please note: pure image posts (non-video/slideshow) might not be supported.*"
+                user_facing_error = "This URL is not supported by the downloader for TikTok. *Please note: pure image posts (non-video/slideshow) might not be supported, or this is a new TikTok format.*"
             else:
                 user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
@@ -786,7 +845,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         await processing_message.edit_text(
             escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
-            parse_mode=ParseMode.MARKETING_V2
+            parse_mode=ParseMode.MARKDOWN_V2
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
