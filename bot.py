@@ -532,39 +532,33 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         if result.stderr:
             logger.warning(f"gallery-dl stderr: {result.stderr}")
         
-        # --- NEW: Retry loop for file detection ---
-        max_retries = 5
-        retry_delay = 0.5 # seconds
+        # --- NEW: Parse stdout directly for file paths ---
         downloaded_files = []
-
-        for attempt in range(max_retries):
-            downloaded_files = [
-                os.path.join(temp_dir, f) for f in os.listdir(temp_dir) 
-                if os.path.isfile(os.path.join(temp_dir, f)) and not f.startswith('.') # Ignore hidden files
-            ]
-            if downloaded_files:
-                logger.info(f"Found {len(downloaded_files)} files after {attempt + 1} attempt(s).")
-                return downloaded_files
-            else:
-                logger.warning(f"Attempt {attempt + 1}/{max_retries}: No files found in {temp_dir} yet. Retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay) # Wait before retrying
-
-        # If loop finishes without finding files
-        logger.error(f"Failed to find any downloaded files in {temp_dir} after {max_retries} attempts.")
-        raise RuntimeError("gallery-dl completed, but no files were found on disk after multiple attempts. This indicates a persistent timing or file system issue.")
+        # Split stdout by lines and look for lines starting with the temp_dir path
+        for line in result.stdout.splitlines():
+            # gallery-dl outputs full paths. Ensure they start with the temp_dir.
+            # Example: downloads/unique_id/tiktok/username/file.jpg
+            if line.startswith(temp_dir) and os.path.isfile(line):
+                downloaded_files.append(line)
+        
+        if not downloaded_files:
+            logger.warning(f"gallery-dl reported success, but no directly extractable files found in stdout or validated on disk.")
+            raise RuntimeError("Download completed, but no image/audio files were found. The link might not contain extractable content.")
+        
+        return downloaded_files
 
     except subprocess.CalledProcessError as e:
         logger.error(f"gallery-dl failed with error code {e.returncode}: {e.stderr}")
-        raise RuntimeError(f"gallery-dl error: {e.stderr}. Please ensure the URL is valid for image downloads.")
+        raise RuntimeError(f"Download failed due to an error from `gallery-dl`\. It might be a private post, region-restricted, or TikTok changed its format\. Details: `{escape_markdown_v2(e.stderr.strip())}`")
     except FileNotFoundError:
         logger.error("gallery-dl command not found. Ensure it's installed and in PATH.")
-        raise RuntimeError("gallery-dl is not installed on the server. Please inform the bot administrator.")
+        raise RuntimeError("`gallery-dl` is not installed on the server\. Please inform the bot administrator\.")
     except subprocess.TimeoutExpired:
         logger.error(f"gallery-dl timed out for URL: {content_url}")
-        raise RuntimeError("Image download timed out. TikTok might be slow or blocking.")
+        raise RuntimeError("Image download timed out\. TikTok might be slow or blocking connections\.")
     except Exception as e:
         logger.error(f"An unexpected error occurred during gallery-dl execution: {e}")
-        raise RuntimeError(f"An unexpected error occurred during image download: {e}")
+        raise RuntimeError(f"An unexpected error occurred during image download: `{escape_markdown_v2(str(e))}`")
 
 # --- Universal Video/Audio Download Handler ---
 
@@ -714,7 +708,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     downloaded_files_list = await try_download_tiktok_image(context, content_url, temp_dir_name)
                 except Exception as ex:
                     # If gallery-dl also fails, then it's truly an unsupported TikTok URL
-                    raise RuntimeError(f"TikTok content not recognized or supported by either downloader: {str(ex)}")
+                    raise RuntimeError(f"TikTok content not recognized or supported by either downloader: `{escape_markdown_v2(str(ex))}`")
 
         else:
             # --- Existing yt-dlp logic for other platforms ---
@@ -862,8 +856,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         try: await animation_task 
         except asyncio.CancelledError: pass
         await processing_message.edit_text(
-            escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(str(e))}`\n\n"
-                               "Please ensure the link is public and valid. Try again later."),
+            escape_markdown_v2(f"Download failed for your {platform} content\\!\n\n"
+                               f"Reason: *{escape_markdown_v2(str(e))}*\n\n" # Updated format here
+                               f"Please double-check the URL and ensure the content is public and available\. Try again later\\."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     except yt_dlp.utils.DownloadError as e:
@@ -892,33 +887,36 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         
         animation_running = False # Stop animation
         if not animation_task.done(): animation_task.cancel()
-        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        try: await animation_task 
         except asyncio.CancelledError: pass
         await processing_message.edit_text(
-            escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
-                               "Please ensure the link is public and valid. Try again later."),
+            escape_markdown_v2(f"Download failed for your {platform} content\\!\n\n" # Updated format here
+                               f"Reason: *{escape_markdown_v2(user_facing_error)}*\n\n" # Updated format here
+                               f"Please double-check the URL and ensure the content is public and available\. Try again later\\."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     except FileNotFoundError as e:
         logger.error(f"File system error during {platform} download for {content_url}: {e}")
         animation_running = False # Stop animation
         if not animation_task.done(): animation_task.cancel()
-        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        try: await animation_task 
         except asyncio.CancelledError: pass
         await processing_message.edit_text(
-            escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
-                               "The content might not have been downloaded correctly. Please try again. "),
+            escape_markdown_v2(f"A file system error occurred during download\\!\n\n" # Updated format here
+                               f"Reason: `{escape_markdown_v2(str(e))}`\n\n" # Updated format here
+                               f"The content might not have been downloaded correctly\. Please try again\."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
         animation_running = False # Stop animation
         if not animation_task.done(): animation_task.cancel()
-        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        try: await animation_task 
         except asyncio.CancelledError: pass
         await processing_message.edit_text(
-            escape_markdown_v2(f"An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
-                               "Please try again later. If the issue persists, contact support. "),
+            escape_markdown_v2(f"An unexpected error occurred while processing your request\\!\n\n" # Updated format here
+                               f"Reason: `{escape_markdown_v2(str(e))}`\n\n" # Updated format here
+                               f"Please try again later\. If the issue persists, contact support\."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     finally:
@@ -1031,7 +1029,7 @@ def main() -> None:
     application.add_handler(CommandHandler("insta", insta_command))
     application.add_handler(CommandHandler("pinterest", pinterest_command))
     application.add_handler(CommandHandler("twitter", twitter_command))
-    application.add_handler(CommandHandler("youtube", youtube_command)) # FIX: Removed extra parenthesis
+    application.add_handler(CommandHandler("youtube", youtube_command))
     application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
     # Callback Query Handlers for inline buttons
