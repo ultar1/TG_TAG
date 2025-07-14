@@ -5,10 +5,10 @@ import asyncio
 import uuid # For unique filenames
 import shutil # For removing directories
 
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
+from sqlalchemy import create_engine, Column, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
@@ -48,7 +48,7 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    # NEW: Changed Integer to BigInteger for user_id and chat_id
+    # Changed Integer to BigInteger for user_id and chat_id to prevent NumericValueOutOfRange
     user_id = Column(BigInteger, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
@@ -132,6 +132,21 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Handler for all messages to record user info, excluding commands."""
     if update.message and update.message.from_user:
         await save_user_to_db(update)
+    
+    # Check if the user is in a state awaiting a URL
+    if update.message and update.message.text:
+        user_data = context.user_data
+        if user_data.get('state') == 'awaiting_url' and user_data.get('platform'):
+            platform_in_state = user_data['platform']
+            url = update.message.text
+            
+            # Clear the state immediately so it doesn't try to process future messages
+            user_data['state'] = None
+            user_data['platform'] = None
+
+            # Call the universal download function
+            await download_content_from_url(update, context, platform_in_state, url)
+            return # Consume the message, don't let it fall through to other handlers if it's a URL for download
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -276,22 +291,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
         await save_user_to_db(update)
+        keyboard = [
+            [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
+            [InlineKeyboardButton("Help", callback_data="help_button")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await update.message.reply_text(
-            escape_markdown_v2("Hi there! I'm a group tagging bot. \n"
-            "To use me, reply to any message in a group with `/tag`.\n"
-            "I'll resend the message and mention all *known* non-admin members "
-            "(those who have messaged in the group while I'm active).\n\n"
-            "You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n"
-            "Try `/fb <Facebook_URL>` for Facebook videos, or `/insta <Instagram_URL>` for Instagram! \n"
-            "And now, try `/pinterest <Pinterest_URL>`, `/twitter <Twitter_URL>`, `/youtube <YouTube_URL>`, or `/soundcloud <SoundCloud_URL>` for more downloads! \n\n"
+            escape_markdown_v2("Hi there! I'm your multimedia download and group tagging bot.\n\n"
+            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info.\n\n"
             "Make sure to turn off Group Privacy for me via @BotFather!"),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
+    keyboard = [
+        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        escape_markdown_v2("How to use the Tag Bot:\n\n"
+        escape_markdown_v2("How to use the Bot:\n\n"
+        "To Download Videos and Audio:\n"
+        "- Tap the 'Download Videos/Audio' button below or use the /download command.\n"
+        "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
+        "- Send the full video/audio URL when prompted.\n\n"
+        "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
         "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> *Turn off*.\n"
         "   Why? This allows me to see all messages in the group and build a list of members to tag.\n"
@@ -299,54 +326,84 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "4. To tag everyone: Reply to any message in the group with the command `/tag`.\n"
         "I will resend the replied message and mention all known non-admin members. "
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
-        "To Download Videos and Audio:\n"
-        "- Use `/tiktok <TikTok_URL>` for TikTok videos.\n"
-        "- Use `/fb <Facebook_URL>` for Facebook videos.\n"
-        "- Use `/insta <Instagram_URL>` for Instagram videos.\n"
-        "- Use `/pinterest <Pinterest_URL>` for Pinterest videos.\n"
-        "- Use `/twitter <Twitter_URL>` for Twitter videos.\n"
-        "- Use `/youtube <YouTube_URL>` for YouTube videos.\n"
-        "- Use `/soundcloud <SoundCloud_URL>` for SoundCloud audio (will be sent as document).\n"
-        "- Provide the full video/audio URL after the command in any chat (group or private).\n\n"
         "Limitations:\n"
+        "- Download functionality relies on `yt-dlp` and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit.\n"
+        "- Some content might require a logged-in session or be geo-restricted.\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
-        "- Very large groups might experience delays or split messages due to Telegram's limits.\n"
-        "- Download functionality relies on `yt-dlp` and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit."),
+        "- Very large groups might experience delays or split messages due to Telegram's limits."),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=reply_markup
+    )
+
+async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer() # Acknowledge the button press
+
+    keyboard = [
+        [
+            InlineKeyboardButton("TikTok", callback_data="download_platform:TikTok"),
+            InlineKeyboardButton("Facebook", callback_data="download_platform:Facebook"),
+            InlineKeyboardButton("Instagram", callback_data="download_platform:Instagram")
+        ],
+        [
+            InlineKeyboardButton("Pinterest", callback_data="download_platform:Pinterest"),
+            InlineKeyboardButton("Twitter", callback_data="download_platform:Twitter"),
+            InlineKeyboardButton("YouTube", callback_data="download_platform:YouTube")
+        ],
+        [
+            InlineKeyboardButton("SoundCloud", callback_data="download_platform:SoundCloud")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        escape_markdown_v2("Please choose a platform to download from:"),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=reply_markup
+    )
+
+async def handle_download_platform_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer() # Acknowledge the button press
+    
+    # Parse the callback data: "download_platform:PLATFORM_NAME"
+    platform_name = query.data.split(":")[1]
+    
+    # Set user state
+    context.user_data['state'] = 'awaiting_url'
+    context.user_data['platform'] = platform_name
+
+    await query.edit_message_text(
+        escape_markdown_v2(f"Please send me the full URL for the {platform_name} content."),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
+
 # --- Universal Video/Audio Download Handler ---
 
-async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str) -> None:
+async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str, content_url: str) -> None:
     """
     Downloads content from a given URL using yt-dlp and sends it.
     Args:
         platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube', 'SoundCloud') for messaging.
+        content_url (str): The URL to download.
     """
     await save_user_to_db(update) # Ensure user is saved
     
-    if not context.args:
-        await update.message.reply_text(
-            escape_markdown_v2(f"Please provide a {platform} URL after the `/{platform.lower()}` command. \n"
-                               f"Example: `/{platform.lower()} https://www.example.com/link`"),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return
-
-    content_url = context.args[0]
+    # The URL is now passed directly from the message handler, not context.args
+    # No need for this check here: if not context.args:
     
     # Basic URL validation specific to platform
-    # Added common domains for each new platform
     valid_platforms = {
         "tiktok": "tiktok.com",
         "fb": "facebook.com",
         "facebook": "facebook.com",
         "instagram": "instagram.com",
         "insta": "instagram.com",
-        "pinterest": "pinterest.com", # Added
-        "twitter": "twitter.com", # Added
-        "youtube": "youtube.com", # Changed from googleusercontent.com
-        "soundcloud": "soundcloud.com" # Added
+        "pinterest": "pinterest.com",
+        "twitter": "twitter.com",
+        "youtube": ["youtube.com", "youtu.be", "youtu.be", "m.youtube.com"], # Updated YouTube domains
+        "soundcloud": "soundcloud.com"
     }
     
     # Use lowercase platform key for dictionary lookup
@@ -356,19 +413,17 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     if platform_key == "fb": # Handle alias
         platform_key = "facebook"
     
-    expected_domain = valid_platforms.get(platform_key)
+    expected_domains = valid_platforms.get(platform_key)
 
-    # For YouTube, check for multiple common YouTube domains
-    if platform_key == "youtube":
-        if not (content_url.startswith("http://") or content_url.startswith("https://")) or \
-           not any(domain in content_url for domain in ["youtube.com", "youtu.be"]):
-            await update.message.reply_text(
-                escape_markdown_v2(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            return
-    elif not (content_url.startswith("http://") or content_url.startswith("https://")) or \
-         (expected_domain and expected_domain not in content_url):
+    is_valid_url = False
+    if content_url.startswith("http://") or content_url.startswith("https://"):
+        if isinstance(expected_domains, list): # For YouTube, check multiple domains
+            if any(domain in content_url for domain in expected_domains):
+                is_valid_url = True
+        elif expected_domains and expected_domains in content_url:
+            is_valid_url = True
+    
+    if not is_valid_url:
         await update.message.reply_text(
             escape_markdown_v2(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
             parse_mode=ParseMode.MARKDOWN_V2
@@ -410,13 +465,10 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         else: # For video platforms
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 
-        # ADDED: Optional cookies file for platforms like Instagram/Facebook/YouTube that sometimes require it
-        # NOTE: This requires you to create a 'cookies.txt' file in your bot's root directory
+        # Optional: Add cookies.txt for platforms like Instagram/Facebook/YouTube that sometimes require it
+        # This requires you to create a 'cookies.txt' file in your bot's root directory
         # containing cookies exported from a logged-in browser session.
-        # This is for advanced use and may not be suitable for a public bot where users
-        # might ask for it, as it shares ONE cookie session for ALL users.
-        # If this file exists, yt-dlp will try to use it.
-        # You would typically export cookies using browser extensions like "Get cookies.txt".
+        # Use with caution, especially for public bots, due to security/privacy.
         if os.path.exists('cookies.txt'):
             ydl_opts['cookiefile'] = 'cookies.txt'
             logger.info("Using cookies.txt for download.")
@@ -544,12 +596,14 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
             user_facing_error = "The link leads to a 404 error (content not found)."
-        elif "rate-limit reached" in error_message or "login required" in error_message: # Refined error message
-            user_facing_error = f"Download failed due to rate-limiting or login requirement. Some content from {platform} may require a logged-in session."
+        elif "rate-limit reached" in error_message or "login required" in error_message or "Please sign in" in error_message: # Added "Please sign in" for YouTube
+            user_facing_error = f"Download failed due to rate-limiting or login requirement. Some content from {platform} may require a logged-in session or you might have to provide cookies (advanced)."
         elif "network error" in error_message or "Connection reset by peer" in error_message:
             user_facing_error = "A network error occurred during download. Please try again later."
         elif "no suitable formats found" in error_message:
             user_facing_error = "No suitable format found for download. The content might be protected or unusual."
+        elif "ffmpeg is not installed" in error_message: # Specific error for FFmpeg
+            user_facing_error = "FFmpeg is not installed on the server, which is required to process this video. Please inform the bot administrator."
         
         await processing_message.edit_text(
             escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
@@ -579,27 +633,65 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             except OSError as e:
                 logger.error(f"Error removing temporary directory {temp_dir_name}: {e}")
 
-# Command-specific wrappers for the universal download function
+# --- Command-specific wrappers for the universal download function (not used directly with buttons) ---
+# These are kept for consistency or if you decide to re-introduce /command <url> later
 async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "TikTok")
+    # If called directly as /tiktok <URL> this will work.
+    # If called via button flow, content_url will be None, and the record_user_message handles it.
+    if context.args:
+        await download_content_from_url(update, context, "TikTok", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "Facebook")
+    if context.args:
+        await download_content_from_url(update, context, "Facebook", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "Instagram")
+    if context.args:
+        await download_content_from_url(update, context, "Instagram", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def pinterest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "Pinterest")
+    if context.args:
+        await download_content_from_url(update, context, "Pinterest", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "Twitter")
+    if context.args:
+        await download_content_from_url(update, context, "Twitter", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "YouTube")
+    if context.args:
+        await download_content_from_url(update, context, "YouTube", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await download_content_from_url(update, context, "SoundCloud")
+    if context.args:
+        await download_content_from_url(update, context, "SoundCloud", context.args[0])
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+        )
 
 
 # --- Main Bot Logic and Heroku Integration ---
@@ -612,21 +704,25 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
     
-    # Register the video/audio download commands
+    # Register the command handlers for explicit /command <url> usage (if desired, currently prompts)
     application.add_handler(CommandHandler("tiktok", tiktok_command))
     application.add_handler(CommandHandler("fb", fb_command))
     application.add_handler(CommandHandler("insta", insta_command))
-    application.add_handler(CommandHandler("pinterest", pinterest_command)) # New
-    application.add_handler(CommandHandler("twitter", twitter_command))     # New
-    application.add_handler(CommandHandler("youtube", youtube_command))     # New
-    application.add_handler(CommandHandler("soundcloud", soundcloud_command)) # New
+    application.add_handler(CommandHandler("pinterest", pinterest_command))
+    application.add_handler(CommandHandler("twitter", twitter_command))
+    application.add_handler(CommandHandler("youtube", youtube_command))
+    application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
-    # Message handler to record all users who send messages in a group
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, record_user_message))
+    # Callback Query Handlers for inline buttons
+    application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
+    application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
+    application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$")) # Added for help button
+
+    # Message handler to record all users who send messages and to handle URLs after button tap
+    # This handler must be added AFTER CommandHandlers and CallbackQueryHandlers
+    # so commands and button presses are handled first.
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, record_user_message))
     
-    # Also record users who interact with the bot in private chats
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, record_user_message))
-
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
