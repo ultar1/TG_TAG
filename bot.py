@@ -11,6 +11,7 @@ from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
 # --- Configuration ---
@@ -47,10 +48,11 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    user_id = Column(Integer, primary_key=True, nullable=False)
+    # NEW: Changed Integer to BigInteger for user_id and chat_id
+    user_id = Column(BigInteger, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    chat_id = Column(Integer, primary_key=True, nullable=False)
+    chat_id = Column(BigInteger, primary_key=True, nullable=False)
 
     def __repr__(self):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
@@ -343,7 +345,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com", # Added
         "twitter": "twitter.com", # Added
-        "youtube": "youtube.com", # Added
+        "youtube": "youtube.com", # Changed from googleusercontent.com
         "soundcloud": "soundcloud.com" # Added
     }
     
@@ -356,10 +358,10 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     
     expected_domain = valid_platforms.get(platform_key)
 
-    # For YouTube, check for youtube.com, youtu.be, and m.youtube.com
+    # For YouTube, check for multiple common YouTube domains
     if platform_key == "youtube":
         if not (content_url.startswith("http://") or content_url.startswith("https://")) or \
-           not any(domain in content_url for domain in ["youtube.com", "youtu.be", "m.youtube.com"]):
+           not any(domain in content_url for domain in ["youtube.com", "youtu.be"]):
             await update.message.reply_text(
                 escape_markdown_v2(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -407,6 +409,19 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             }]
         else: # For video platforms
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+
+        # ADDED: Optional cookies file for platforms like Instagram/Facebook/YouTube that sometimes require it
+        # NOTE: This requires you to create a 'cookies.txt' file in your bot's root directory
+        # containing cookies exported from a logged-in browser session.
+        # This is for advanced use and may not be suitable for a public bot where users
+        # might ask for it, as it shares ONE cookie session for ALL users.
+        # If this file exists, yt-dlp will try to use it.
+        # You would typically export cookies using browser extensions like "Get cookies.txt".
+        if os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+            logger.info("Using cookies.txt for download.")
+        else:
+            logger.info("No cookies.txt found. Proceeding without cookies.")
 
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -465,7 +480,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         # Decide whether to send as video/audio or document based on platform and size
         if platform_key == "soundcloud": # Always send audio as document
             await processing_message.edit_text(
-                escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. 📤"),
+                escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             with open(downloaded_file_path, 'rb') as audio_file:
@@ -481,7 +496,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
             # Send as document if larger than 50MB (Telegram's send_video limit)
             await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. 📤"),
+                escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             with open(downloaded_file_path, 'rb') as video_file:
@@ -497,7 +512,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         else:
             # Send as video if smaller than 50MB
             await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. 📤"),
+                escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             with open(downloaded_file_path, 'rb') as video_file:
@@ -529,6 +544,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
             user_facing_error = "The link leads to a 404 error (content not found)."
+        elif "rate-limit reached" in error_message or "login required" in error_message: # Refined error message
+            user_facing_error = f"Download failed due to rate-limiting or login requirement. Some content from {platform} may require a logged-in session."
         elif "network error" in error_message or "Connection reset by peer" in error_message:
             user_facing_error = "A network error occurred during download. Please try again later."
         elif "no suitable formats found" in error_message:
