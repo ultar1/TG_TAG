@@ -307,12 +307,13 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messages_to_send = []
     current_mentions_group = []
     
+    # Use len() on the encoded string to approximate byte length for Telegram's character limit
     current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n ".encode('utf-8'))
     
     for mention_link in members_to_tag_links:
         mention_length_bytes = len(mention_link.encode('utf-8'))
         
-        if (current_message_base_length_bytes + sum(len(m.encode('utf-16')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or # Use utf-16 for accurate byte length for Telegram's character limit
+        if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) 
@@ -372,8 +373,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await update.message.reply_text(
             escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n" # Escaped !
-            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\.\n\n" # Escaped !
-            "Make sure to turn off Group Privacy for me via @BotFather\\!"), # Escaped !
+            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\."), # Escaped ! (removed the extra sentence)
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
@@ -596,7 +596,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             # Some platforms might return a generic ID, use title if available for filename to be more descriptive
             suggested_filename_base = info_dict.get('title', info_dict.get('id', 'content'))
             # Clean filename from problematic characters (e.g., / \ : * ? " < > |)
-            suggested_filename_base = "".join(c for c c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            # FIX: Removed the duplicate 'c for c'
+            suggested_filename_base = "".join(c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
             # Truncate filename if too long for filesystem limits (e.g., 255 chars)
             if len(suggested_filename_base) > 150: # Arbitrary but reasonable limit
                 suggested_filename_base = suggested_filename_base[:150]
