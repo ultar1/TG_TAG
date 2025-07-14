@@ -17,8 +17,9 @@ from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
 # --- Configuration ---
+# Set logging level to DEBUG to see the tracing messages
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG # Changed to DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -214,24 +215,38 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # --- Command Handlers ---
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler for all messages to record user info, excluding commands."""
-    if update.message and update.message.from_user:
-        await save_user_to_db(update, context) # Pass context here
+    """Handler for all messages to record user info, excluding commands,
+       and to process URLs if the user is in an 'awaiting_url' state."""
     
-    # Check if the user is in a state awaiting a URL
-    if update.message and update.message.text:
-        user_data = context.user_data
-        if user_data.get('state') == 'awaiting_url' and user_data.get('platform'):
-            platform_in_state = user_data['platform']
-            url = update.message.text
-            
-            # Clear the state immediately so it doesn't try to process future messages
-            user_data['state'] = None
-            user_data['platform'] = None
+    if not update.message or not update.message.text:
+        return # Not a text message
 
-            # Call the universal download function
-            await download_content_from_url(update, context, platform_in_state, url)
-            return # IMPORTANT: Consume the message here, don't let it fall through to other handlers if it's a URL for download
+    # Always save user info for any message that reaches here
+    if update.message.from_user:
+        await save_user_to_db(update, context) 
+    
+    user_data = context.user_data
+    logger.debug(f"record_user_message: Current user_data state: {user_data.get('state')}, platform: {user_data.get('platform')}")
+
+    # Check if the user is in a state awaiting a URL
+    if user_data.get('state') == 'awaiting_url' and user_data.get('platform'):
+        platform_in_state = user_data['platform']
+        url = update.message.text
+        logger.debug(f"record_user_message: Detected awaiting_url state for platform {platform_in_state}. URL received: {url}")
+        
+        # Clear the state immediately so it doesn't try to process future messages
+        user_data['state'] = None
+        user_data['platform'] = None
+        logger.debug("record_user_message: Cleared user_data state.")
+
+        # Call the universal download function
+        await download_content_from_url(update, context, platform_in_state, url)
+        return # IMPORTANT: Consume the message, don't let it fall through to other general handlers
+
+    # If not in awaiting_url state, then this is just a regular message.
+    # No further action needed here, as other handlers might manage specific text.
+    logger.debug(f"record_user_message: Not in awaiting_url state. Message text: {update.message.text}")
+
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -536,6 +551,7 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
     # Set user state
     context.user_data['state'] = 'awaiting_url'
     context.user_data['platform'] = platform_name
+    logger.debug(f"handle_download_platform_selection: Set user_data state to 'awaiting_url' for platform '{platform_name}' for user {query.from_user.id}")
 
     await query.edit_message_text(
         escape_markdown_v2(f"Please send me the full URL for the {platform_name} content."),
@@ -549,6 +565,8 @@ async def handle_reply_keyboard_buttons(update: Update, context: ContextTypes.DE
     # Ensure user is saved and notification sent for this interaction
     if update.message and update.message.from_user:
         await save_user_to_db(update, context)
+
+    logger.debug(f"handle_reply_keyboard_buttons: Received message: '{user_message}'")
 
     if user_message == "Download Videos/Audio":
         # Create and send the inline keyboard for platform selection
@@ -598,7 +616,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube, 'SoundCloud') for messaging.
         content_url (str): The URL to download.
     """
-    # save_user_to_db already called by record_user_message before this function
+    logger.info(f"download_content_from_url: Attempting download for URL: {content_url} from platform: {platform}")
     
     # Basic URL validation specific to platform
     valid_platforms = {
@@ -610,7 +628,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
         # Simplified YouTube domains for common URLs. yt-dlp can handle more.
-        "youtube": ["youtube.com", "youtu.be"], 
+        "youtube": ["youtube.com", "youtu.be"], # Added youtu.be for YouTube
         "soundcloud": "soundcloud.com"
     }
     
@@ -632,6 +650,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             is_valid_url = True
     
     if not is_valid_url:
+        logger.warning(f"Invalid URL for {platform}: {content_url}")
         await update.message.reply_text(
             escape_markdown_v2(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
             parse_mode=ParseMode.MARKDOWN_V2
@@ -997,14 +1016,15 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
     application.add_handler(CallbackQueryHandler(help_command_from_inline_button, pattern="^help_button$"))
 
-    # IMPORTANT ORDER:
+    # IMPORTANT ORDER FOR MESSAGE HANDLERS:
     # 1. MessageHandler for specific Reply Keyboard button texts (filters.TEXT & ~filters.COMMAND)
-    #    This ensures button presses are handled before the general message handler.
+    #    This handler must be before the general record_user_message to ensure it captures button presses.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply_keyboard_buttons))
 
     # 2. General Message Handler (filters.ALL & ~filters.COMMAND)
     #    This handles all other non-command messages, including URLs when in 'awaiting_url' state.
-    #    It must be placed after more specific text handlers (like the one above) and command handlers.
+    #    It will only be called if the message was NOT handled by the specific text message handler above
+    #    or any command handler.
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, record_user_message))
     
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
