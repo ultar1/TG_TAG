@@ -1,5 +1,5 @@
 python-telegram-bot[webhooks]>=21.2 
 SQLAlchemy>=2.0.30 
 psycopg2-binary>=2.9.9
-yt-dlp
+yt-dlp>=2025.6.30
 gallery-dl
