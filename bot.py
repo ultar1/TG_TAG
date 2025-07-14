@@ -383,7 +383,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await save_user_to_db(update, context) # Pass context here
         keyboard = [
             [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
-            [InlineKeyboardButton("Help", callback_data="help_button")]
+            [InlineKeyboardButton("Help", callback_data="help_button")],
+            # Added Contact Admin button
+            [InlineKeyboardButton("Contact Admin", url="https://t.me/star_ies1")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -401,7 +403,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await save_user_to_db(update, context)
 
     keyboard = [
-        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")]
+        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
+        # Added Contact Admin button to help menu as well
+        [InlineKeyboardButton("Contact Admin", url="https://t.me/star_ies1")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -620,7 +624,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             
             if info_dict.get('is_live'):
                 animation_running = False # Stop animation
-                await animation_task # Ensure the animation task finishes (or is cancelled)
+                if not animation_task.done(): animation_task.cancel()
+                try: await animation_task # Ensure the animation task finishes (or is cancelled)
+                except asyncio.CancelledError: pass
                 await processing_message.edit_text(
                     escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
                     parse_mode=ParseMode.MARKDOWN_V2
@@ -673,7 +679,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         # Decide whether to send as video/audio or document based on platform and size
         if platform_key == "soundcloud": # Always send audio as document
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done(): animation_task.cancel()
+            try: await animation_task # Ensure the animation task finishes (or is cancelled)
+            except asyncio.CancelledError: pass
             await processing_message.edit_text(
                 escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -691,7 +699,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
             # Send as document if larger than 50MB (Telegram's send_video limit)
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done(): animation_task.cancel()
+            try: await animation_task # Ensure the animation task finishes (or is cancelled)
+            except asyncio.CancelledError: pass
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -709,7 +719,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         else:
             # Send as video if smaller than 50MB
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done(): animation_task.cancel()
+            try: await animation_task # Ensure the animation task finishes (or is cancelled)
+            except asyncio.CancelledError: pass
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -740,7 +752,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         if "ERROR: This video is unavailable" in error_message or "TikTok said: Video unavailable" in error_message or "Private video" in error_message or "This content isn't available" in error_message:
             user_facing_error = "The content might be private, removed, or region-restricted."
         elif "Unsupported URL" in error_message:
-            user_facing_error = f"This URL is not supported by the downloader for {platform}."
+            # Enhanced message for TikTok specifically
+            if platform_key == "tiktok":
+                user_facing_error = "This URL is not supported by the downloader for TikTok. *Please note: pure image posts (non-video/slideshow) might not be supported.*"
+            else:
+                user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
             user_facing_error = "The link leads to a 404 error (content not found)."
         elif "rate-limit reached" in error_message or "login required" in error_message or "Please sign in" in error_message: # Added "Please sign in" for YouTube
@@ -753,7 +769,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             user_facing_error = "FFmpeg is not installed on the server, which is required to process this video. Please inform the bot administrator."
         
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done(): animation_task.cancel()
+        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        except asyncio.CancelledError: pass
         await processing_message.edit_text(
             escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
                                "Please ensure the link is public and valid. Try again later."),
@@ -762,16 +780,20 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     except FileNotFoundError as e:
         logger.error(f"File system error during {platform} download for {content_url}: {e}")
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done(): animation_task.cancel()
+        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        except asyncio.CancelledError: pass
         await processing_message.edit_text(
             escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKETING_V2
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done(): animation_task.cancel()
+        try: await animation_task # Ensure the animation task finishes (or is cancelled)
+        except asyncio.CancelledError: pass
         await processing_message.edit_text(
             escape_markdown_v2(f"An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
                                "Please try again later. If the issue persists, contact support. "),
