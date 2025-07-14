@@ -6,8 +6,8 @@ import uuid # For unique filenames
 import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
-import subprocess # NEW: For running gallery-dl
-from urllib.parse import urlparse, parse_qs # NEW: For URL parsing
+import subprocess # For running gallery-dl
+from urllib.parse import urlparse, parse_qs # For URL parsing
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -518,8 +518,12 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         'gallery-dl',
         content_url,
         '-o', os.path.join(temp_dir, '%(filename)s.%(extension)s'),
-        '-d', temp_dir
+        '-d', temp_dir,
+        '--cookies', 'cookies.txt' # Pass cookies if available, gallery-dl can use it
     ]
+    # Check if cookies.txt exists and append it to command
+    if not os.path.exists('cookies.txt'):
+        command = [cmd for cmd in command if cmd not in ['--cookies', 'cookies.txt']] # Remove if no cookie file
 
     try:
         # Run gallery-dl as a subprocess
@@ -528,6 +532,9 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         if result.stderr:
             logger.warning(f"gallery-dl stderr: {result.stderr}")
         
+        # Give the filesystem a moment to catch up after gallery-dl finishes
+        await asyncio.sleep(1) # Added 1-second delay
+
         # After successful download, find all downloaded files in the temp directory
         downloaded_files = [
             os.path.join(temp_dir, f) for f in os.listdir(temp_dir) 
@@ -535,8 +542,10 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         ]
         
         if not downloaded_files:
-            logger.warning(f"gallery-dl reported success but no files found in {temp_dir}")
-            raise RuntimeError("gallery-dl did not download any files.")
+            logger.warning(f"gallery-dl reported success but no files found in {temp_dir}. This might be a timing issue.")
+            # Even if it says no files, we'll let the main logic's error handling catch it if it still fails
+            # but this warning indicates the timing problem.
+            raise RuntimeError("gallery-dl did not locate any files after download. Potential timing issue.")
         
         return downloaded_files
 
@@ -782,7 +791,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_document(
                         chat_id=update.message.chat_id,
                         document=InputFile(f, filename=file_name),
-                        caption=f"Here's your {platform} image: {file_name}",
+                        caption=f"Here's your {platform} image: {file_name}", # Simplified caption
                         parse_mode=ParseMode.MARKDOWN_V2,
                         read_timeout=300,
                         write_timeout=300,
@@ -804,7 +813,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_document(
                         chat_id=update.message.chat_id,
                         document=InputFile(f, filename=file_name), # Use actual filename
-                        caption=f"Here's your {platform} content: {file_name}",
+                        caption=f"Here's your {platform} content: {file_name}", # Simplified caption
                         parse_mode=ParseMode.MARKDOWN_V2,
                         read_timeout=300, # Increased timeout for large uploads
                         write_timeout=300, # Increased timeout for large uploads
@@ -820,7 +829,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_video(
                         chat_id=update.message.chat_id,
                         video=InputFile(f, filename=file_name), # Use actual filename
-                        caption=f"Here's your {platform} video: {file_name}",
+                        caption=f"Here's your {platform} video: {file_name}", # Simplified caption
                         parse_mode=ParseMode.MARKDOWN_V2,
                         supports_streaming=True, # Allows streaming before full download
                         read_timeout=300, 
@@ -864,10 +873,6 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             # Enhanced message for TikTok specifically
             if platform_key == "tiktok":
                 user_facing_error = "This TikTok URL is not supported for direct video download. *It might be a pure image post or a new TikTok format.* Attempting image download fallback now (if not already tried)." # Clarify for user
-                # This specific point should now trigger the gallery-dl fallback attempt
-                # However, if yt-dlp fails even info extraction, we need to handle that earlier.
-                # The logic above already attempts gallery-dl as a fallback if yt-dlp's info extraction fails.
-                # So this part is mostly for informing the user about the nature of the error if it propagates this far.
             else:
                 user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
@@ -1022,7 +1027,7 @@ def main() -> None:
     application.add_handler(CommandHandler("insta", insta_command))
     application.add_handler(CommandHandler("pinterest", pinterest_command))
     application.add_handler(CommandHandler("twitter", twitter_command))
-    application.add_handler(CommandHandler("youtube", youtube_command))
+    application.add_handler("youtube", youtube_command))
     application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
     # Callback Query Handlers for inline buttons
