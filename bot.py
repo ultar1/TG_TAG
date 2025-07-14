@@ -632,22 +632,24 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     animation_task = asyncio.create_task(animate_loading())
 
     downloaded_files_list = [] # This will hold paths to all downloaded files
-    info_dict = None # To store yt-dlp info_dict if applicable
-
+    
     try:
         # --- NEW: TikTok Specific Logic for Images vs Videos ---
-        # First, try to get info using yt-dlp without downloading to determine content type.
-        # This handles short URLs that resolve to either video or photo content.
         if platform_key == "tiktok":
+            # Attempt to get info using yt-dlp first. This will resolve short URLs.
             yt_dlp_info_opts = {
                 'quiet': True,
                 'no_warnings': True,
-                'force_generic_extractor': False, # Allow specific extractors
-                'skip_download': True, # Only get info
+                'force_generic_extractor': False,
+                'skip_download': True,
                 'logger': logger,
             }
             if os.path.exists('cookies.txt'):
                 yt_dlp_info_opts['cookiefile'] = 'cookies.txt'
+
+            info_dict = None
+            is_tiktok_photo_post = False
+            is_tiktok_video = False
 
             try:
                 with yt_dlp.YoutubeDL(yt_dlp_info_opts) as ydl:
@@ -655,67 +657,51 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 
                 # Check for 'aweme_type' which is specific to TikTok from yt-dlp's info_dict
                 # TikTok photo carousels often have 'aweme_type': 150
-                # Regular videos might have 'aweme_type': 0 or other values
                 is_tiktok_photo_post = info_dict.get('aweme_type') == 150
-                
-                if is_tiktok_photo_post:
-                    logger.info(f"TikTok URL identified by yt-dlp info as photo post (aweme_type=150), attempting gallery-dl: {content_url}")
-                    downloaded_files_list = await try_download_tiktok_image(context, content_url, temp_dir_name)
-                elif info_dict.get('extractor') == 'tiktok' and info_dict.get('is_video'):
-                    # If it's explicitly identified as a video by tiktok extractor
-                    logger.info(f"TikTok URL identified by yt-dlp info as video, proceeding with yt-dlp download: {content_url}")
-                    # Re-configure ydl_opts for actual download
-                    ydl_opts = {
-                        'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
-                        'noplaylist': True,
-                        'verbose': False,
-                        'logger': logger,
-                        'no_warnings': True,
-                        'postprocessors': [{
-                            'key': 'FFmpegVideoConvertor',
-                            'preferedformat': 'mp4',
-                        }],
-                        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-                    }
-                    if os.path.exists('cookies.txt'):
-                        ydl_opts['cookiefile'] = 'cookies.txt'
-
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
-                        ydl_download.download([content_url])
-                    
-                    downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
-                    if not downloaded_files_list:
-                        raise FileNotFoundError("yt-dlp did not download any file for TikTok video.")
-                else:
-                    # Fallback for other TikTok content yt-dlp might handle, or if info_dict is ambiguous
-                    logger.warning(f"TikTok URL not clearly identified as video or photo post, falling back to general yt-dlp attempt: {content_url}")
-                    # Try general yt-dlp for it (same as non-tiktok platforms but specific to tiktok domain)
-                    ydl_opts = {
-                        'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
-                        'noplaylist': True,
-                        'verbose': False,
-                        'logger': logger,
-                        'no_warnings': True,
-                        'postprocessors': [{
-                            'key': 'FFmpegVideoConvertor',
-                            'preferedformat': 'mp4',
-                        }],
-                        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-                    }
-                    if os.path.exists('cookies.txt'):
-                        ydl_opts['cookiefile'] = 'cookies.txt'
-
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
-                        ydl_download.download([content_url])
-                    downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
-                    if not downloaded_files_list:
-                        raise FileNotFoundError("yt-dlp did not download any file for TikTok (fallback).")
-
+                is_tiktok_video = info_dict.get('extractor') == 'tiktok' and info_dict.get('is_video')
 
             except yt_dlp.utils.DownloadError as e:
-                # If yt-dlp *cannot even get info* from a TikTok link, it's truly unsupported by it.
-                logger.error(f"yt-dlp could not get info for TikTok URL {content_url}: {e}")
-                raise RuntimeError(f"TikTok content not recognized or supported: {str(e)}")
+                # If yt-dlp fails to even get info, it might be a format gallery-dl can handle.
+                logger.warning(f"yt-dlp could not get info for TikTok URL {content_url} (might be image): {e}")
+                # We'll try gallery-dl as a fallback in this case
+                pass # Continue to the conditional logic below
+
+            if is_tiktok_photo_post:
+                logger.info(f"TikTok URL identified by yt-dlp info as photo post (aweme_type=150), attempting gallery-dl: {content_url}")
+                downloaded_files_list = await try_download_tiktok_image(context, content_url, temp_dir_name)
+            elif is_tiktok_video:
+                logger.info(f"TikTok URL identified by yt-dlp info as video, proceeding with yt-dlp download: {content_url}")
+                # Re-configure ydl_opts for actual download
+                ydl_opts = {
+                    'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
+                    'noplaylist': True,
+                    'verbose': False,
+                    'logger': logger,
+                    'no_warnings': True,
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }],
+                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                }
+                if os.path.exists('cookies.txt'):
+                    ydl_opts['cookiefile'] = 'cookies.txt'
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
+                    ydl_download.download([content_url])
+                
+                downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
+                if not downloaded_files_list:
+                    raise FileNotFoundError("yt-dlp did not download any file for TikTok video.")
+            else:
+                # Fallback: if yt-dlp couldn't clearly identify or failed info extraction, try gallery-dl.
+                # This covers cases where yt-dlp gives "Unsupported URL" even at info stage for images.
+                logger.warning(f"TikTok URL not clearly identified as video, attempting gallery-dl as fallback: {content_url}")
+                try:
+                    downloaded_files_list = await try_download_tiktok_image(context, content_url, temp_dir_name)
+                except Exception as ex:
+                    # If gallery-dl also fails, then it's truly an unsupported TikTok URL
+                    raise RuntimeError(f"TikTok content not recognized or supported by either downloader: {str(ex)}")
 
         else:
             # --- Existing yt-dlp logic for other platforms ---
@@ -749,7 +735,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
 
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(content_url, download=True) # Changed to download=True
+                # For non-TikTok, we can download directly and extract info together
+                info_dict = ydl.extract_info(content_url, download=True) 
                 
             downloaded_files_list = [os.path.join(temp_dir_name, f) for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
             if not downloaded_files_list:
@@ -782,12 +769,12 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             
             if is_image:
                 if file_size > TELEGRAM_DOCUMENT_LIMIT_BYTES:
-                     await processing_message.edit_text(
+                     await processing_message.edit_text( # Edit current message
                         escape_markdown_v2(f"Image too large to send: ({file_size / (1024*1024):.2f} MB). Telegram limit is 2GB."),
                         parse_mode=ParseMode.MARKDOWN_V2
                     )
                      continue # Skip to next file if multiple
-                await processing_message.edit_text(
+                await processing_message.edit_text( # Edit current message
                     escape_markdown_v2(f"Image downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait... "),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
@@ -804,12 +791,12 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             elif platform_key == "soundcloud" or file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
                 # Send as document if audio or larger than 50MB (Telegram's send_video limit)
                 if file_size > TELEGRAM_DOCUMENT_LIMIT_BYTES:
-                     await processing_message.edit_text(
+                     await processing_message.edit_text( # Edit current message
                         escape_markdown_v2(f"Video/Audio too large to send: ({file_size / (1024*1024):.2f} MB). Telegram limit is 2GB."),
                         parse_mode=ParseMode.MARKDOWN_V2
                     )
                      continue # Skip to next file if multiple
-                await processing_message.edit_text(
+                await processing_message.edit_text( # Edit current message
                     escape_markdown_v2(f"Content downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
@@ -825,7 +812,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     )
             else:
                 # Send as video if smaller than 50MB
-                await processing_message.edit_text(
+                await processing_message.edit_text( # Edit current message
                     escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
@@ -876,7 +863,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif "Unsupported URL" in error_message:
             # Enhanced message for TikTok specifically
             if platform_key == "tiktok":
-                user_facing_error = "This TikTok URL is not supported. *Pure image posts (non-video/slideshow) may not be supported, or this is a new TikTok format.*"
+                user_facing_error = "This TikTok URL is not supported for direct video download. *It might be a pure image post or a new TikTok format.* Attempting image download fallback now (if not already tried)." # Clarify for user
+                # This specific point should now trigger the gallery-dl fallback attempt
+                # However, if yt-dlp fails even info extraction, we need to handle that earlier.
+                # The logic above already attempts gallery-dl as a fallback if yt-dlp's info extraction fails.
+                # So this part is mostly for informing the user about the nature of the error if it propagates this far.
             else:
                 user_facing_error = f"This URL is not supported by the downloader for {platform}."
         elif "HTTP Error 404" in error_message:
