@@ -151,6 +151,11 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
 
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Saves or updates user information in the database and sends admin notification."""
+    # This function expects update.message to be present
+    if not update.message or not update.message.from_user:
+        logger.warning("save_user_to_db called without a valid message or user object.")
+        return
+
     user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
@@ -214,9 +219,14 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # --- Command Handlers ---
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler for all messages to record user info, excluding commands."""
+    """
+    Handler for messages that are NOT commands, NOT specific keyboard button texts,
+    and are potentially URLs for download based on user state.
+    It also saves user info for general interactions.
+    """
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context) # Pass context here
+        # Save user info for any message that passes through here
+        await save_user_to_db(update, context) 
     
     # Check if the user is in a state awaiting a URL
     if update.message and update.message.text:
@@ -231,21 +241,30 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             # Call the universal download function
             await download_content_from_url(update, context, platform_in_state, url)
-            return # Consume the message, don't let it fall through to other handlers if it's a URL for download
-        # Handle the new keyboard button press
-        elif update.message.text == "Download Videos/Audio":
-            # Simulate a callback query for the existing handler
-            class DummyCallbackQuery:
-                def __init__(self, message, from_user, data):
-                    self.message = message
-                    self.from_user = from_user
-                    self.data = data
-                async def answer(self):
-                    pass # Do nothing, just simulate the method
+            return # Consume the message if it's a URL for download
 
-            dummy_query = DummyCallbackQuery(update.message, update.message.from_user, "show_download_options")
-            await show_download_options(type('Update', (object,), {'callback_query': dummy_query})(), context)
-            return # Consume the message
+    # If it's not a URL for download, it's just a regular message.
+    # We could add a default response here if needed, but for now, it just records.
+    # Example: await update.message.reply_text(escape_markdown_v2("I didn't understand that. Please use the buttons or commands."))
+
+
+async def handle_keyboard_download_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Download Videos/Audio' keyboard button press."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+
+    # Call the existing show_download_options logic.
+    # show_download_options is designed to work with both CallbackQuery and direct Message updates.
+    await show_download_options(update, context)
+
+async def handle_keyboard_help_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Help' keyboard button press."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+    
+    # Call the existing help_command logic
+    await help_command(update, context)
+
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -396,19 +415,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message and update.message.from_user:
         await save_user_to_db(update, context) # Pass context here
 
-        # Inline Keyboard (still useful for specific actions or dynamic options)
-        inline_keyboard = [
-            [InlineKeyboardButton("Download Videos/Audio (Inline)", callback_data="show_download_options")],
-            [InlineKeyboardButton("Help (Inline)", callback_data="help_button")]
-        ]
-        inline_reply_markup = InlineKeyboardMarkup(inline_keyboard)
-
         # Regular Keyboard (persistent, appears above message input)
         keyboard = [
             [KeyboardButton("Download Videos/Audio")], # Text for the button
             [KeyboardButton("Help")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
+
+        # Inline Keyboard (still useful for specific actions or dynamic options)
+        inline_keyboard = [
+            [InlineKeyboardButton("Download Videos/Audio (Inline)", callback_data="show_download_options")],
+            [InlineKeyboardButton("Help (Inline)", callback_data="help_button")]
+        ]
+        # inline_reply_markup = InlineKeyboardMarkup(inline_keyboard) # Defined but not used directly in reply_text for start
 
         await update.message.reply_text(
             escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
@@ -454,20 +473,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    
-    # Check if it's a callback query or a direct message from the keyboard
-    if query:
-        await query.answer() # Acknowledge the button press
-        message_to_edit = query.message
-        from_user = query.from_user
-        chat_id = query.message.chat_id
-        chat_type = query.message.chat.type
-    else: # This path is for the regular keyboard button press
-        message_to_edit = update.message
-        from_user = update.message.from_user
-        chat_id = update.message.chat_id
-        chat_type = update.message.chat.type
+    # Determine if the update came from a CallbackQuery or a regular Message
+    message_source = update.callback_query or update.message
+
+    if not message_source or not message_source.from_user:
+        logger.warning("show_download_options called without a valid message or user object.")
+        return
+
+    # Extract info from the appropriate source (query.message or update.message)
+    from_user = message_source.from_user
+    chat_id = message_source.chat_id if hasattr(message_source, 'chat_id') else message_source.chat.id
+    chat_type = message_source.chat.type
 
     # Save user on interaction point
     class DummyMessage:
@@ -477,7 +493,7 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
             self.chat = type('Chat', (object,), {'type': chat_type})() # Mock chat object
     
     dummy_message = DummyMessage(from_user, chat_id, chat_type)
-    dummy_update = type('Update', (object,), {'message': dummy_message})()
+    dummy_update = Update(update_id=0, message=dummy_message)
     await save_user_to_db(dummy_update, context)
 
     keyboard = [
@@ -497,19 +513,21 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Edit the existing message or send a new one based on the source
-    if query:
-        await message_to_edit.edit_text(
+    if update.callback_query:
+        # It's an inline button press, edit the existing message
+        await update.callback_query.answer() # Acknowledge the inline button press
+        await update.callback_query.edit_message_text(
             escape_markdown_v2("Please choose a platform to download from:"),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
-    else:
-        await message_to_edit.reply_text(
+    else: # It's a regular message (from the ReplyKeyboardMarkup button)
+        await update.message.reply_text(
             escape_markdown_v2("Please choose a platform to download from:"),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
+
 
 async def handle_download_platform_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -560,7 +578,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be"], # Simplified YouTube domains for common URLs
+        "youtube": ["youtube.com", "youtu.be", "m.youtube.com"], # More comprehensive YouTube domains
         "soundcloud": "soundcloud.com"
     }
     
@@ -931,18 +949,25 @@ def main() -> None:
     application.add_handler(CommandHandler("youtube", youtube_command))
     application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
-    # Callback Query Handlers for inline buttons
+    # --- IMPORTANT: Order matters here! Specific handlers first. ---
+
+    # 1. Specific Message Handlers for Keyboard Buttons
+    # Use filters.Regex to match the exact button text.
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
+
+    # 2. Callback Query Handlers for inline buttons
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
-    application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$")) # Added for help button
+    application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$"))
 
-    # Message handler to record all users who send messages and to handle URLs after button tap
-    # This handler must be added AFTER CommandHandlers and CallbackQueryHandlers
-    # so commands and button presses are handled first.
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, record_user_message))
+    # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
+    # This handler will also save user info and handle URLs when in 'awaiting_url' state.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
+
