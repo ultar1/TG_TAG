@@ -521,9 +521,9 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         '-d', temp_dir,
         '--cookies', 'cookies.txt' # Pass cookies if available, gallery-dl can use it
     ]
-    # Check if cookies.txt exists and append it to command
+    # Check if cookies.txt exists and remove --cookies if not
     if not os.path.exists('cookies.txt'):
-        command = [cmd for cmd in command if cmd not in ['--cookies', 'cookies.txt']] # Remove if no cookie file
+        command = [cmd for cmd in command if cmd not in ['--cookies', 'cookies.txt']]
 
     try:
         # Run gallery-dl as a subprocess
@@ -532,22 +532,26 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         if result.stderr:
             logger.warning(f"gallery-dl stderr: {result.stderr}")
         
-        # Give the filesystem a moment to catch up after gallery-dl finishes
-        await asyncio.sleep(1) # Added 1-second delay
+        # --- NEW: Retry loop for file detection ---
+        max_retries = 5
+        retry_delay = 0.5 # seconds
+        downloaded_files = []
 
-        # After successful download, find all downloaded files in the temp directory
-        downloaded_files = [
-            os.path.join(temp_dir, f) for f in os.listdir(temp_dir) 
-            if os.path.isfile(os.path.join(temp_dir, f)) and not f.startswith('.') # Ignore hidden files
-        ]
-        
-        if not downloaded_files:
-            logger.warning(f"gallery-dl reported success but no files found in {temp_dir}. This might be a timing issue.")
-            # Even if it says no files, we'll let the main logic's error handling catch it if it still fails
-            # but this warning indicates the timing problem.
-            raise RuntimeError("gallery-dl did not locate any files after download. Potential timing issue.")
-        
-        return downloaded_files
+        for attempt in range(max_retries):
+            downloaded_files = [
+                os.path.join(temp_dir, f) for f in os.listdir(temp_dir) 
+                if os.path.isfile(os.path.join(temp_dir, f)) and not f.startswith('.') # Ignore hidden files
+            ]
+            if downloaded_files:
+                logger.info(f"Found {len(downloaded_files)} files after {attempt + 1} attempt(s).")
+                return downloaded_files
+            else:
+                logger.warning(f"Attempt {attempt + 1}/{max_retries}: No files found in {temp_dir} yet. Retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay) # Wait before retrying
+
+        # If loop finishes without finding files
+        logger.error(f"Failed to find any downloaded files in {temp_dir} after {max_retries} attempts.")
+        raise RuntimeError("gallery-dl completed, but no files were found on disk after multiple attempts. This indicates a persistent timing or file system issue.")
 
     except subprocess.CalledProcessError as e:
         logger.error(f"gallery-dl failed with error code {e.returncode}: {e.stderr}")
