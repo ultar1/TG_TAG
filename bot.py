@@ -7,7 +7,7 @@ import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
 
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String, UniqueConstraint
@@ -231,7 +231,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             # Call the universal download function
             await download_content_from_url(update, context, platform_in_state, url)
-            return # Consume the message, don't let it fall through to other handlers if it's a URL for download
+            return # IMPORTANT: Consume the message here, don't let it fall through to other handlers if it's a URL for download
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -285,6 +285,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         administrators = await context.bot.get_chat_administrators(chat_id)
         for admin in administrators:
             current_chat_administrators_ids.add(admin.user.id)
+            # Make sure the bot itself is also excluded from tagging
             if admin.user.id == context.bot.id: 
                 current_chat_administrators_ids.add(admin.user.id)
         logger.info(f"Telegram API: Found {len(current_chat_administrators_ids)} administrators for chat {chat_id}.")
@@ -341,11 +342,11 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         current_mentions_group.append(mention_link)
 
     if current_mentions_group:
-        if not messages_to_send and full_message_content_start: 
+        # This logic ensures that if there's only one group of mentions, or the last group
+        # it correctly prepends the initial message content.
+        if not messages_to_send or full_message_content_start: 
              messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group))
-        elif messages_to_send: 
-             messages_to_send.append(" " + " ".join(current_mentions_group))
-        else: 
+        else: # For subsequent messages, just add mentions
              messages_to_send.append(" " + " ".join(current_mentions_group))
 
 
@@ -424,25 +425,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits.")
     
-    # When /help is called directly, you might still want a subtle inline button to 'Download Videos/Audio'
-    # or just show the main reply keyboard if it's not already there.
-    # For consistency, let's just send the text, as the main keyboard will already be present.
+    # When /help is called directly, send the help text and ensure the main reply keyboard is present.
     await update.message.reply_text(
         help_text,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=ReplyKeyboardMarkup(
             [[KeyboardButton("Download Videos/Audio")], [KeyboardButton("Help")], [KeyboardButton("Contact Admin")]],
             resize_keyboard=True, one_time_keyboard=False
-        ) # Ensure the main keyboard is shown/re-shown
+        )
     )
 
-# Handler for the inline 'Help' button, similar to above but for callback query
+# Handler for the inline 'Help' button (e.g., from the initial /start message if you keep it)
 async def help_command_from_inline_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
     if query.message and query.from_user:
-        class DummyMessage:
+        class DummyMessage: # Mock message object for save_user_to_db
             def __init__(self, from_user, chat_id, chat_type):
                 self.from_user = from_user
                 self.chat_id = chat_id
@@ -471,6 +470,7 @@ async def help_command_from_inline_button(update: Update, context: ContextTypes.
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits.")
     
+    # Edit the inline message with the help text.
     await query.edit_message_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 
@@ -481,8 +481,6 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
     # Save user on callback query as well, as this is an interaction point
     if query.message and query.from_user:
         # Create a dummy message object for save_user_to_db
-        # This is a bit of a workaround because save_user_to_db expects update.message
-        # You could refactor save_user_to_db to take user and chat directly if preferred
         class DummyMessage:
             def __init__(self, from_user, chat_id, chat_type):
                 self.from_user = from_user
@@ -544,7 +542,7 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-# NEW: Handler for the Reply Keyboard buttons
+# NEW: Handler for the Reply Keyboard buttons (text messages)
 async def handle_reply_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_message = update.message.text
     
@@ -576,18 +574,19 @@ async def handle_reply_keyboard_buttons(update: Update, context: ContextTypes.DE
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
+        return # Important: Return here to prevent further processing by general message handler
+    
     elif user_message == "Help":
         # Call the existing help command function directly
         await help_command(update, context)
+        return # Important: Return here
+
     elif user_message == "Contact Admin":
         await update.message.reply_text(
             escape_markdown_v2("You can contact the admin here: [star_ies1](https://t.me/star_ies1)"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
-    # Important: Do NOT add an else clause here that calls record_user_message,
-    # as record_user_message is already registered as a general MessageHandler
-    # and would create a duplicate call for other text messages.
-    # The record_user_message will still run after this handler if the filter matches.
+        return # Important: Return here
 
 
 # --- Universal Video/Audio Download Handler ---
@@ -610,7 +609,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be"], # Simplified YouTube domains for common URLs
+        # Simplified YouTube domains for common URLs. yt-dlp can handle more.
+        "youtube": ["youtube.com", "youtu.be"], 
         "soundcloud": "soundcloud.com"
     }
     
@@ -696,9 +696,6 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 
         # Optional: Add cookies.txt for platforms like Instagram/Facebook/YouTube that sometimes require it
-        # This requires you to create a 'cookies.txt' file in your bot's root directory
-        # containing cookies exported from a logged-in browser session.
-        # Use with caution, especially for public bots, due to security/privacy.
         if os.path.exists('cookies.txt'):
             ydl_opts['cookiefile'] = 'cookies.txt'
             logger.info("Using cookies.txt for download.")
@@ -906,14 +903,10 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
 # --- Command-specific wrappers for the universal download function (not used directly with buttons) ---
 # These are kept for consistency or if you decide to re-introduce /command <url> later
 async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # If called directly as /tiktok <URL> this will work.
-    # If called via button flow, content_url will be None, and the record_user_message handles it.
     if context.args:
-        # Ensure user is saved and notification sent
         await save_user_to_db(update, context)
         await download_content_from_url(update, context, "TikTok", context.args[0])
     else:
-        # Ensure user is saved and notification sent even if command is incomplete
         await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
@@ -985,12 +978,12 @@ def main() -> None:
     """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Command Handlers
+    # Command Handlers (for /start, /help, /tag, etc.)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
     
-    # Register the command handlers for explicit /command <url> usage (if desired, currently prompts)
+    # Specific Command Handlers for direct /platform_name <url> usage (if still desired)
     application.add_handler(CommandHandler("tiktok", tiktok_command))
     application.add_handler(CommandHandler("fb", fb_command))
     application.add_handler(CommandHandler("insta", insta_command))
@@ -999,19 +992,19 @@ def main() -> None:
     application.add_handler(CommandHandler("youtube", youtube_command))
     application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
-    # Callback Query Handlers for inline buttons (used after "Download Videos/Audio" is chosen)
+    # Callback Query Handlers (for inline buttons, like platform selection)
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
-    application.add_handler(CallbackQueryHandler(help_command_from_inline_button, pattern="^help_button$")) # Handler for help button on initial inline keyboard
+    application.add_handler(CallbackQueryHandler(help_command_from_inline_button, pattern="^help_button$"))
 
-    # Message handler for Reply Keyboard button presses and general text messages
-    # This handler should be added BEFORE the general record_user_message handler
-    # if you want its specific text matches to be processed first.
+    # IMPORTANT ORDER:
+    # 1. MessageHandler for specific Reply Keyboard button texts (filters.TEXT & ~filters.COMMAND)
+    #    This ensures button presses are handled before the general message handler.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply_keyboard_buttons))
 
-    # General Message handler to record all users who send messages and to handle URLs after button tap
-    # This handler must be added AFTER CommandHandlers and specific MessageHandlers like the one above,
-    # so commands and specific text button presses are handled first.
+    # 2. General Message Handler (filters.ALL & ~filters.COMMAND)
+    #    This handles all other non-command messages, including URLs when in 'awaiting_url' state.
+    #    It must be placed after more specific text handlers (like the one above) and command handlers.
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, record_user_message))
     
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
