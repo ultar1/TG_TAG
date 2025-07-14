@@ -1027,7 +1027,7 @@ def main() -> None:
     application.add_handler(CommandHandler("insta", insta_command))
     application.add_handler(CommandHandler("pinterest", pinterest_command))
     application.add_handler(CommandHandler("twitter", twitter_command))
-    application.add_handler("youtube", youtube_command))
+    application.add_handler(CommandHandler("youtube", youtube_command)) # FIX: Removed extra parenthesis
     application.add_handler(CommandHandler("soundcloud", soundcloud_command))
 
     # Callback Query Handlers for inline buttons
