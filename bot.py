@@ -538,8 +538,9 @@ async def try_download_tiktok_image(context: ContextTypes.DEFAULT_TYPE, content_
         for line in result.stdout.splitlines():
             # gallery-dl outputs full paths. Ensure they start with the temp_dir.
             # Example: downloads/unique_id/tiktok/username/file.jpg
-            if line.startswith(temp_dir) and os.path.isfile(line):
-                downloaded_files.append(line)
+            potential_file_path = line.strip().split(' ', 1)[0] # Take the part before first space if path is followed by text
+            if potential_file_path.startswith(temp_dir) and os.path.isfile(potential_file_path):
+                downloaded_files.append(potential_file_path)
         
         if not downloaded_files:
             logger.warning(f"gallery-dl reported success, but no directly extractable files found in stdout or validated on disk.")
@@ -789,7 +790,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_document(
                         chat_id=update.message.chat_id,
                         document=InputFile(f, filename=file_name),
-                        caption=f"Here's your {platform} image: {file_name}", # Simplified caption
+                        caption=f"Here's your {platform} image: {escape_markdown_v2(file_name)}", # Escaped file_name here
                         parse_mode=ParseMode.MARKDOWN_V2,
                         read_timeout=300,
                         write_timeout=300,
@@ -811,7 +812,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_document(
                         chat_id=update.message.chat_id,
                         document=InputFile(f, filename=file_name), # Use actual filename
-                        caption=f"Here's your {platform} content: {file_name}", # Simplified caption
+                        caption=f"Here's your {platform} content: {escape_markdown_v2(file_name)}", # Escaped file_name here
                         parse_mode=ParseMode.MARKDOWN_V2,
                         read_timeout=300, # Increased timeout for large uploads
                         write_timeout=300, # Increased timeout for large uploads
@@ -827,7 +828,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     await context.bot.send_video(
                         chat_id=update.message.chat_id,
                         video=InputFile(f, filename=file_name), # Use actual filename
-                        caption=f"Here's your {platform} video: {file_name}", # Simplified caption
+                        caption=f"Here's your {platform} video: {escape_markdown_v2(file_name)}", # Escaped file_name here
                         parse_mode=ParseMode.MARKDOWN_V2,
                         supports_streaming=True, # Allows streaming before full download
                         read_timeout=300, 
@@ -856,7 +857,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         try: await animation_task 
         except asyncio.CancelledError: pass
         await processing_message.edit_text(
-            escape_markdown_v2(f"Download failed for your {platform} content\\!\n\n"
+            escape_markdown_v2(f"Download failed for your {platform} content\\!\n\n" # Updated format here
                                f"Reason: *{escape_markdown_v2(str(e))}*\n\n" # Updated format here
                                f"Please double-check the URL and ensure the content is public and available\. Try again later\\."),
             parse_mode=ParseMode.MARKDOWN_V2
@@ -1007,7 +1008,6 @@ async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await save_user_to_db(update, context)
         await download_content_from_url(update, context, "SoundCloud", context.args[0])
     else:
-        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
