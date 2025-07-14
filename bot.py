@@ -383,7 +383,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await save_user_to_db(update, context) # Pass context here
         keyboard = [
             [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
-            [InlineKeyboardButton("Help", callback_data="help_button")]
+            [InlineKeyboardButton("Help", callback_data="help_button")],
+            # Added Contact Admin button
+            [InlineKeyboardButton("Contact Admin", url="https://t.me/star_ies1")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -401,7 +403,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await save_user_to_db(update, context)
 
     keyboard = [
-        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")]
+        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
+        # Added Contact Admin button to help menu as well
+        [InlineKeyboardButton("Contact Admin", url="https://t.me/star_ies1")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -620,7 +624,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             
             if info_dict.get('is_live'):
                 animation_running = False # Stop animation
-                await animation_task # Ensure the animation task finishes (or is cancelled)
+                if not animation_task.done(): animation_task.cancel()
+                try: await animation_task # Ensure the animation task finishes (or is cancelled)
+                except asyncio.CancelledError: pass
                 await processing_message.edit_text(
                     escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
                     parse_mode=ParseMode.MARKDOWN_V2
@@ -780,7 +786,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         await processing_message.edit_text(
             escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKETING_V2
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
