@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-# HEROKU_APP_NAME is no longer strictly needed for polling, but keeping it as an env var is harmless.
-# HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME") 
 
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN environment variable not set. Exiting.")
@@ -71,7 +69,6 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     
     # Correct list of special characters for MarkdownV2, including backslash itself to be handled first.
-    # We already handle backslash explicitly first, so no need to put it here.
     special_chars = r'_*[]()~`>#+-=|{}.!'
     
     # Process backslashes first, then other special characters
@@ -85,7 +82,7 @@ async def save_user_to_db(update: Update):
     user = update.message.from_user
     chat_id = update.message.chat_id
 
-    if update.message.chat.type not in ["group", "supergroup"]:
+    if update.message.chat.type not in ["group", "supergroup", "private"]: # Include private chats for /tiktok
         return
 
     session = Session()
@@ -282,6 +279,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "To use me, reply to any message in a group with `/tag`.\n"
             "I'll resend the message and mention all *known* non-admin members "
             "(those who have messaged in the group while I'm active).\n\n"
+            "You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n\n"
             "Make sure to turn off Group Privacy for me via @BotFather!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -298,11 +296,101 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "4. **To tag everyone:** Reply to any message in the group with the command `/tag`.\n"
         "I will resend the replied message and mention all known non-admin members. "
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
+        "**To Download TikTok Videos:**\n"
+        "- Use the command `/tiktok <TikTok_URL>` in any chat (group or private).\n"
+        "- Provide the full TikTok video URL after the command.\n\n"
         "**Limitations:**\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
-        "- Very large groups might experience delays or split messages due to Telegram's limits."),
+        "- Very large groups might experience delays or split messages due to Telegram's limits.\n"
+        "- TikTok download functionality relies on external services and may not always work if the service is down or TikTok changes its API."),
         parse_mode=ParseMode.MARKDOWN_V2
     )
+
+# --- TikTok Download Handler ---
+
+async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Downloads a TikTok video given its URL."""
+    await save_user_to_db(update) # Ensure user is saved
+    
+    if not context.args:
+        await update.message.reply_text(
+            escape_markdown_v2("Please provide a TikTok video URL after the `/tiktok` command\. \n"
+                               "Example: `/tiktok https://www.tiktok.com/@username/video/1234567890`"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    tiktok_url = context.args[0]
+    # Basic URL validation (you might want a more robust regex)
+    if not (tiktok_url.startswith("http://") or tiktok_url.startswith("https://")) or "tiktok.com" not in tiktok_url:
+        await update.message.reply_text(
+            escape_markdown_v2("That doesn't look like a valid TikTok URL\. Please provide a full URL\."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    processing_message = await update.message.reply_text(
+        escape_markdown_v2("⏳ Getting your TikTok video, please wait... This might take a moment\. ⏳"),
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+    try:
+        # --- Placeholder for TikTok Video Download Logic ---
+        # This is where you would integrate with a TikTok download API or a tool like yt-dlp.
+        # For demonstration purposes, I'm just creating a dummy URL.
+        # In a real scenario, you'd make an HTTP request to a service or run a subprocess.
+
+        # Example using a hypothetical API:
+        # import httpx # You'd need to install httpx or requests
+        # api_url = f"https://your-tiktok-downloader-api.com/download?url={urllib.parse.quote(tiktok_url)}"
+        # async with httpx.AsyncClient() as client:
+        #     response = await client.get(api_url, timeout=30.0) # Add a timeout
+        #     response.raise_for_status()
+        #     data = response.json()
+        #     video_direct_url = data.get("video_url")
+        #     if not video_direct_url:
+        #         raise ValueError("Could not get video URL from API response.")
+
+        # For a more robust solution, especially for self-hosting, consider using yt-dlp:
+        # You'd need to run yt-dlp as a subprocess and parse its output.
+        # Example (requires yt-dlp to be installed on your system/dyno and executable in PATH):
+        # process = await asyncio.create_subprocess_exec(
+        #     "yt-dlp", "--no-warnings", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        #     "--get-url", tiktok_url,
+        #     stdout=asyncio.subprocess.PIPE,
+        #     stderr=asyncio.subprocess.PIPE
+        # )
+        # stdout, stderr = await process.communicate()
+        # if process.returncode != 0:
+        #     raise RuntimeError(f"yt-dlp failed: {stderr.decode()}")
+        # video_direct_url = stdout.decode().strip()
+
+        # Dummy response for demonstration
+        video_direct_url = "https://example.com/your_tiktok_video_download_link.mp4" # Replace with actual logic
+        
+        # Check if the generated URL is valid (not empty and starts with http)
+        if not video_direct_url or not (video_direct_url.startswith("http://") or video_direct_url.startswith("https://")):
+            raise ValueError("Failed to get a valid direct video download link.")
+
+        await processing_message.edit_text(
+            escape_markdown_v2(f"✅ Here's your TikTok video download link: \n\n{video_direct_url}\n\n"
+                               "💡 You can usually click this link to open the video in your browser and then download it\."),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            disable_web_page_preview=False # Allow link preview for the video
+        )
+
+    except Exception as e:
+        logger.error(f"Error downloading TikTok video for {tiktok_url}: {e}")
+        await processing_message.edit_text(
+            escape_markdown_v2(f"❌ Failed to download the TikTok video\. Error: `{escape_markdown_v2(str(e))}`\n\n"
+                               "Possible reasons:\n"
+                               "  - The link is broken or private\n"
+                               "  - TikTok changed its format (I need an update)\n"
+                               "  - The download service is temporarily unavailable\n"
+                               "Please try again later or with a different link\. ✨"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
 
 # --- Main Bot Logic and Heroku Integration ---
 def main() -> None:
@@ -313,6 +401,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
+    application.add_handler(CommandHandler("tiktok", tiktok_download)) # New TikTok handler
 
     # Message handler to record all users who send messages in a group
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, record_user_message))
@@ -320,11 +409,9 @@ def main() -> None:
     # Also record users who interact with the bot in private chats
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, record_user_message))
 
-    # For polling, simply run the application without webhook specifics
-    # IMPORTANT: If deploying to Heroku, this should be run on a WORKER dyno, NOT a WEB dyno.
-    # Your Procfile should be something like: worker: python bot.py
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
+
