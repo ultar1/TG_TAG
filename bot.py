@@ -1,16 +1,17 @@
 import logging
 import os
 import sys
-import signal
 import asyncio
+import uuid # For unique filenames
+import shutil # For removing directories
 
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-import urllib.parse
+import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
 # --- Configuration ---
 logging.basicConfig(
@@ -21,12 +22,21 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# Define a temporary directory for downloads
+# On Heroku, this will be in the ephemeral filesystem
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True) # Create if it doesn't exist
+
+# Telegram's direct video upload limit (50 MB)
+TELEGRAM_VIDEO_LIMIT_MB = 50
+TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
+
 if not BOT_TOKEN:
-    logger.critical("BOT_TOKEN environment variable not set. Exiting.")
+    logger.critical("⛔BOT_TOKEN environment variable not set. Exiting.")
     sys.exit(1)
 
 if not DATABASE_URL:
-    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    logger.critical("⛔DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
     sys.exit(1)
 
 if DATABASE_URL.startswith("postgres://"):
@@ -50,9 +60,9 @@ engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 
 try:
     Base.metadata.create_all(engine)
-    logger.info("Database tables checked/created successfully.")
+    logger.info("✅Database tables checked/created successfully.")
 except OperationalError as e:
-    logger.critical(f"Failed to connect to database or create tables: {e}. Exiting.")
+    logger.critical(f"❌Failed to connect to database or create tables: {e}. Exiting.")
     sys.exit(1)
 
 Session = sessionmaker(bind=engine)
@@ -97,21 +107,21 @@ async def save_user_to_db(update: Update):
             )
             session.add(new_user)
             session.commit()
-            logger.info(f"DB: Added user {user.id} ({user.first_name}) for chat {chat_id}")
+            logger.info(f"💾DB: Added user {user.id} ({user.first_name}) for chat {chat_id}")
         else:
             if (existing_user.first_name != user.first_name or
                 existing_user.username != user.username):
                 existing_user.first_name = user.first_name
                 existing_user.username = user.username
                 session.commit()
-                logger.info(f"DB: Updated user {user.id} ({user.first_name}) for chat {chat_id}")
+                logger.info(f"✏️DB: Updated user {user.id} ({user.first_name}) for chat {chat_id}")
 
     except IntegrityError:
         session.rollback()
-        logger.warning(f"DB: User {user.id} already exists (race condition) for chat {chat_id}. Rolling back.")
+        logger.warning(f"⚠️DB: User {user.id} already exists (race condition) for chat {chat_id}. Rolling back.")
     except Exception as e:
         session.rollback()
-        logger.error(f"DB: Error saving/updating user {user.id} for chat {chat_id}: {e}")
+        logger.error(f"❌DB: Error saving/updating user {user.id} for chat {chat_id}: {e}")
     finally:
         session.close()
 
@@ -128,7 +138,6 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     Splits messages if too many mentions.
     """
     if not update.message.reply_to_message:
-        # FIXED: Escaped static string
         await update.message.reply_text(
             escape_markdown_v2("Please reply to a message with `/tag` to use this command."),
             parse_mode=ParseMode.MARKDOWN_V2
@@ -140,16 +149,14 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     replied_message_text = replied_message.text or replied_message.caption
 
     if not replied_message_text:
-        # FIXED: Escaped static string
         await update.message.reply_text(
             escape_markdown_v2("The replied message does not contain any text or caption to resend."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
 
-    # FIXED: Escaped static string
     feedback_message = await update.message.reply_text(
-        escape_markdown_v2("Fetching user list and preparing mentions, please wait..."),
+        escape_markdown_v2("⏳Fetching user list and preparing mentions, please wait..."),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -159,8 +166,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         all_known_users_in_chat = session.query(User).filter_by(chat_id=chat_id).all()
         logger.info(f"DB: Found {len(all_known_users_in_chat)} known users for chat {chat_id}.")
     except Exception as e:
-        logger.error(f"DB: Error querying users for chat {chat_id}: {e}")
-        # FIXED: Escaped static string
+        logger.error(f"❌DB: Error querying users for chat {chat_id}: {e}")
         await feedback_message.edit_text(escape_markdown_v2("An error occurred while fetching known users from the database. Please try again later."))
         return
     finally:
@@ -177,7 +183,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 current_chat_administrators_ids.add(admin.user.id)
         logger.info(f"Telegram API: Found {len(current_chat_administrators_ids)} administrators for chat {chat_id}.")
     except Exception as e:
-        logger.warning(f"Telegram API: Could not retrieve chat administrators for chat {chat_id}: {e}. Admins might not be excluded from tagging if this fails or bot is not admin.")
+        logger.warning(f"⚠️Telegram API: Could not retrieve chat administrators for chat {chat_id}: {e}. Admins might not be excluded from tagging if this fails or bot is not admin.")
 
     for user_obj in all_known_users_in_chat:
         if user_obj.user_id not in current_chat_administrators_ids:
@@ -186,9 +192,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             members_to_tag_links.append(f"[{escaped_mention_name}](tg://user?id={user_obj.user_id})")
 
     if not members_to_tag_links:
-        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            escape_markdown_v2("No known non-admin members to tag in this group. Users must send a message first to be added to the tag list, and ensure bot privacy is off."),
+            escape_markdown_v2("🤷No known non-admin members to tag in this group. Users must send a message first to be added to the tag list, and ensure bot privacy is off."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -220,7 +225,6 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
-            # This part should be safe now because full_message_content_start is escaped
             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) 
             
             current_mentions_group = []
@@ -238,7 +242,6 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
              messages_to_send.append(" " + " ".join(current_mentions_group))
 
 
-    # FIXED: Escaped static string
     await feedback_message.edit_text(escape_markdown_v2(f"Sending {len(messages_to_send)} messages with mentions..."))
 
     successful_sends = 0
@@ -253,18 +256,16 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             successful_sends += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
+            logger.error(f"❌Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
 
     if successful_sends == len(messages_to_send):
-        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            escape_markdown_v2(f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members."),
+            escape_markdown_v2(f"✅Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     else:
-        # FIXED: Escaped static string
         await feedback_message.edit_text(
-            escape_markdown_v2(f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off."),
+            escape_markdown_v2(f"⚠️Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -273,43 +274,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
         await save_user_to_db(update)
-        # FIXED: Escaped static string
         await update.message.reply_text(
-            escape_markdown_v2("Hi there! I'm a group tagging bot. \n"
+            escape_markdown_v2("👋Hi there! I'm a group tagging bot. \n"
             "To use me, reply to any message in a group with `/tag`.\n"
             "I'll resend the message and mention all *known* non-admin members "
             "(those who have messaged in the group while I'm active).\n\n"
-            "You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n\n"
-            "Make sure to turn off Group Privacy for me via @BotFather!"),
+            "✨You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n\n"
+            "✅Make sure to turn off Group Privacy for me via @BotFather!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
-    # FIXED: Escaped static string. Note: the `**` for bold is Markdown itself, not special char.
     await update.message.reply_text(
-        escape_markdown_v2("**How to use the Tag Bot:**\n\n"
-        "1. **Add me to your group** and **make me an Administrator** (this helps me exclude admins from tags).\n"
-        "2. **Crucial:** Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> **Turn off**.\n"
-        "   *Why?* This allows me to see all messages in the group and build a list of members to tag.\n"
-        "3. **Wait for members to send messages.** I can only tag users who have sent a message in the group *after* I've joined and my Group Privacy is off.\n"
-        "4. **To tag everyone:** Reply to any message in the group with the command `/tag`.\n"
+        escape_markdown_v2("ℹ️**How to use the Tag Bot:**\n\n"
+        "1. **➕Add me to your group** and **make me an Administrator** (this helps me exclude admins from tags).\n"
+        "2. **🚨Crucial:** Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> **Turn off**.\n"
+        "   *❓Why?* This allows me to see all messages in the group and build a list of members to tag.\n"
+        "3. **⏳Wait for members to send messages.** I can only tag users who have sent a message in the group *after* I've joined and my Group Privacy is off.\n"
+        "4. **👥To tag everyone:** Reply to any message in the group with the command `/tag`.\n"
         "I will resend the replied message and mention all known non-admin members. "
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
-        "**To Download TikTok Videos:**\n"
+        "🎥**To Download TikTok Videos:**\n"
         "- Use the command `/tiktok <TikTok_URL>` in any chat (group or private).\n"
         "- Provide the full TikTok video URL after the command.\n\n"
-        "**Limitations:**\n"
+        "🚫**Limitations:**\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits.\n"
-        "- TikTok download functionality relies on external services and may not always work if the service is down or TikTok changes its API."),
+        "- TikTok download functionality relies on `yt-dlp` and may not always work if the video is restricted or TikTok changes its API, or if the file size exceeds Telegram's 2GB limit. ✨"),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
 # --- TikTok Download Handler ---
 
 async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Downloads a TikTok video given its URL."""
+    """Downloads a TikTok video given its URL and sends it."""
     await save_user_to_db(update) # Ensure user is saved
     
     if not context.args:
@@ -321,7 +320,8 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     tiktok_url = context.args[0]
-    # Basic URL validation (you might want a more robust regex)
+    
+    # Basic URL validation
     if not (tiktok_url.startswith("http://") or tiktok_url.startswith("https://")) or "tiktok.com" not in tiktok_url:
         await update.message.reply_text(
             escape_markdown_v2("That doesn't look like a valid TikTok URL\. Please provide a full URL\."),
@@ -329,67 +329,129 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
+    # Create a unique temporary directory for this download
+    temp_dir_name = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir_name, exist_ok=True)
+    
     processing_message = await update.message.reply_text(
-        escape_markdown_v2("⏳ Getting your TikTok video, please wait... This might take a moment\. ⏳"),
+        escape_markdown_v2("⏳Getting your TikTok video, please wait... This might take a moment\. ⏳"),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
+    downloaded_file_path = None
     try:
-        # --- Placeholder for TikTok Video Download Logic ---
-        # This is where you would integrate with a TikTok download API or a tool like yt-dlp.
-        # For demonstration purposes, I'm just creating a dummy URL.
-        # In a real scenario, you'd make an HTTP request to a service or run a subprocess.
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', # Prioritize MP4
+            'noplaylist': True,
+            'verbose': True, # For debugging
+            'logger': logger,
+            'no_warnings': True,
+        }
 
-        # Example using a hypothetical API:
-        # import httpx # You'd need to install httpx or requests
-        # api_url = f"https://your-tiktok-downloader-api.com/download?url={urllib.parse.quote(tiktok_url)}"
-        # async with httpx.AsyncClient() as client:
-        #     response = await client.get(api_url, timeout=30.0) # Add a timeout
-        #     response.raise_for_status()
-        #     data = response.json()
-        #     video_direct_url = data.get("video_url")
-        #     if not video_direct_url:
-        #         raise ValueError("Could not get video URL from API response.")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(tiktok_url, download=False) # Get info first
+            if info_dict.get('is_live'):
+                await processing_message.edit_text(
+                    escape_markdown_v2("🚫Sorry, I cannot download live streams\. Please provide a link to a completed video\."),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                return
+            
+            # Use 'actual_ext' if available, otherwise 'ext'
+            file_extension = info_dict.get('actual_ext', info_dict.get('ext', 'mp4'))
+            suggested_filename = f"{info_dict.get('id', 'video')}.{file_extension}"
+            downloaded_file_path = os.path.join(temp_dir_name, suggested_filename)
 
-        # For a more robust solution, especially for self-hosting, consider using yt-dlp:
-        # You'd need to run yt-dlp as a subprocess and parse its output.
-        # Example (requires yt-dlp to be installed on your system/dyno and executable in PATH):
-        # process = await asyncio.create_subprocess_exec(
-        #     "yt-dlp", "--no-warnings", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        #     "--get-url", tiktok_url,
-        #     stdout=asyncio.subprocess.PIPE,
-        #     stderr=asyncio.subprocess.PIPE
-        # )
-        # stdout, stderr = await process.communicate()
-        # if process.returncode != 0:
-        #     raise RuntimeError(f"yt-dlp failed: {stderr.decode()}")
-        # video_direct_url = stdout.decode().strip()
+            logger.info(f"Attempting to download {tiktok_url} to {downloaded_file_path}")
+            ydl.download([tiktok_url])
+            logger.info(f"Downloaded video to {downloaded_file_path}")
 
-        # Dummy response for demonstration
-        video_direct_url = "https://example.com/your_tiktok_video_download_link.mp4" # Replace with actual logic
+        if not os.path.exists(downloaded_file_path):
+            # Fallback for when yt-dlp might choose a slightly different name
+            # Find the actual downloaded file in the temp directory
+            downloaded_files = [f for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
+            if downloaded_files:
+                downloaded_file_path = os.path.join(temp_dir_name, downloaded_files[0])
+            else:
+                raise FileNotFoundError("yt-dlp did not download any file or file not found.")
+
+        file_size = os.path.getsize(downloaded_file_path) # in bytes
+        logger.info(f"Downloaded file size: {file_size / (1024*1024):.2f} MB")
+
+        # Get video title for caption
+        video_title = escape_markdown_v2(info_dict.get('title', 'TikTok Video'))
         
-        # Check if the generated URL is valid (not empty and starts with http)
-        if not video_direct_url or not (video_direct_url.startswith("http://") or video_direct_url.startswith("https://")):
-            raise ValueError("Failed to get a valid direct video download link.")
+        if file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
+            # Send as document if larger than 50MB (Telegram's send_video limit)
+            await processing_message.edit_text(
+                escape_markdown_v2(f"✅Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB)\. Please wait, this might take a while\. 📤"),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            with open(downloaded_file_path, 'rb') as video_file:
+                await context.bot.send_document(
+                    chat_id=update.message.chat_id,
+                    document=InputFile(video_file, filename=suggested_filename),
+                    caption=f"🎥Here's your TikTok video: {video_title}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    read_timeout=300, # Increased timeout for large uploads
+                    write_timeout=300, # Increased timeout for large uploads
+                    connect_timeout=300 # Increased timeout for large uploads
+                )
+        else:
+            # Send as video if smaller than 50MB
+            await processing_message.edit_text(
+                escape_markdown_v2(f"✅Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB)\. Please wait\. 📤"),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            with open(downloaded_file_path, 'rb') as video_file:
+                await context.bot.send_video(
+                    chat_id=update.message.chat_id,
+                    video=InputFile(video_file, filename=suggested_filename),
+                    caption=f"🎥Here's your TikTok video: {video_title}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    supports_streaming=True, # Allows streaming before full download
+                    read_timeout=300, 
+                    write_timeout=300,
+                    connect_timeout=300
+                )
 
-        await processing_message.edit_text(
-            escape_markdown_v2(f"✅ Here's your TikTok video download link: \n\n{video_direct_url}\n\n"
-                               "💡 You can usually click this link to open the video in your browser and then download it\."),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            disable_web_page_preview=False # Allow link preview for the video
-        )
-
-    except Exception as e:
-        logger.error(f"Error downloading TikTok video for {tiktok_url}: {e}")
-        await processing_message.edit_text(
-            escape_markdown_v2(f"❌ Failed to download the TikTok video\. Error: `{escape_markdown_v2(str(e))}`\n\n"
-                               "Possible reasons:\n"
-                               "  - The link is broken or private\n"
-                               "  - TikTok changed its format (I need an update)\n"
-                               "  - The download service is temporarily unavailable\n"
-                               "Please try again later or with a different link\. ✨"),
+        await processing_message.delete() # Remove the "processing" message
+        await update.message.reply_text(
+            escape_markdown_v2("🎉Your TikTok video has been sent successfully\! Enjoy\!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
+
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"❌yt-dlp download error for {tiktok_url}: {e}")
+        error_message = str(e)
+        if "ERROR: This video is unavailable" in error_message or "TikTok said: Video unavailable" in error_message:
+            user_facing_error = "The video might be private, removed, or region-restricted."
+        elif "Unsupported URL" in error_message:
+            user_facing_error = "This URL is not supported by the downloader."
+        else:
+            user_facing_error = "An unexpected download error occurred."
+        
+        await processing_message.edit_text(
+            escape_markdown_v2(f"❌Failed to download the TikTok video: `{escape_markdown_v2(user_facing_error)}`\n\n"
+                               "💡Please ensure the link is public and valid\. Try again later\. ✨"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except Exception as e:
+        logger.error(f"❌Error processing TikTok download for {tiktok_url}: {e}", exc_info=True)
+        await processing_message.edit_text(
+            escape_markdown_v2(f"❌An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
+                               "Please try again later\. If the issue persists, contact support\. 😟"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    finally:
+        # Clean up the temporary directory
+        if os.path.exists(temp_dir_name):
+            try:
+                shutil.rmtree(temp_dir_name)
+                logger.info(f"Cleaned up temporary directory: {temp_dir_name}")
+            except OSError as e:
+                logger.error(f"Error removing temporary directory {temp_dir_name}: {e}")
 
 
 # --- Main Bot Logic and Heroku Integration ---
@@ -409,7 +471,7 @@ def main() -> None:
     # Also record users who interact with the bot in private chats
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, record_user_message))
 
-    logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
+    logger.info("🚀Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
