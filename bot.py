@@ -104,15 +104,22 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Use current time of interaction
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Apply escape_markdown_v2 to all variables that go into the message
+    # before concatenating them.
+    escaped_event_type = escape_markdown_v2(event_type)
+    escaped_first_name = escape_markdown_v2(first_name)
+    escaped_username = escape_markdown_v2(username) if username != 'N/A' else 'N/A'
+    escaped_chat_type = escape_markdown_v2(chat_type)
+    
     notification_message = (
-        f"🔔 New User Interaction! 🔔\n\n"
-        f"Event Type: *{escape_markdown_v2(event_type)}*\n"
-        f"User ID: `{user_id}`\n"
-        f"First Name: *{escape_markdown_v2(first_name)}*\n"
-        f"Username: `@{escape_markdown_v2(username)}`" if username != 'N/A' else f"Username: `N/A`\n"
-        f"Chat ID: `{chat_id}`\n"
-        f"Chat Type: *{escape_markdown_v2(chat_type)}*\n"
-        f"Time: `{current_time}`"
+        f"🔔 New User Interaction\\! 🔔\n\n" # Escaped the ! here
+        f"Event Type: *{escaped_event_type}*\n"
+        f"User ID: `{user_id}`\n" # User IDs are numbers, so they don't need escaping
+        f"First Name: *{escaped_first_name}*\n"
+        f"Username: `@{escaped_username}`" if escaped_username != 'N/A' else f"Username: `N/A`\n"
+        f"Chat ID: `{chat_id}`\n" # Chat IDs are numbers, so they don't need escaping
+        f"Chat Type: *{escaped_chat_type}*\n"
+        f"Time: `{escape_markdown_v2(current_time)}`" # Time string can have colons, so escape it too
     )
     
     try:
@@ -305,7 +312,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for mention_link in members_to_tag_links:
         mention_length_bytes = len(mention_link.encode('utf-8'))
         
-        if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
+        if (current_message_base_length_bytes + sum(len(m.encode('utf-16')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or # Use utf-16 for accurate byte length for Telegram's character limit
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) 
@@ -364,9 +371,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            escape_markdown_v2("Hi there! I'm your multimedia download and group tagging bot.\n\n"
-            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info.\n\n"
-            "Make sure to turn off Group Privacy for me via @BotFather!"),
+            escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n" # Escaped !
+            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\.\n\n" # Escaped !
+            "Make sure to turn off Group Privacy for me via @BotFather\\!"), # Escaped !
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
@@ -482,7 +489,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     """
     Downloads content from a given URL using yt-dlp and sends it.
     Args:
-        platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube', 'SoundCloud') for messaging.
+        platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube, 'SoundCloud') for messaging.
         content_url (str): The URL to download.
     """
     # save_user_to_db already called by record_user_message before this function
@@ -589,7 +596,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             # Some platforms might return a generic ID, use title if available for filename to be more descriptive
             suggested_filename_base = info_dict.get('title', info_dict.get('id', 'content'))
             # Clean filename from problematic characters (e.g., / \ : * ? " < > |)
-            suggested_filename_base = "".join(c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            suggested_filename_base = "".join(c for c c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
             # Truncate filename if too long for filesystem limits (e.g., 255 chars)
             if len(suggested_filename_base) > 150: # Arbitrary but reasonable limit
                 suggested_filename_base = suggested_filename_base[:150]
