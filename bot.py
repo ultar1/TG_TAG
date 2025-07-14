@@ -5,6 +5,7 @@ import asyncio
 import uuid # For unique filenames
 import shutil # For removing directories
 import datetime # Import for timestamp in notification
+import time # Import for time-based notification throttling
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -21,7 +22,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# 1. Hardcoded Bot Token
+BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuqSuE4JrW0Y"
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Define a temporary directory for downloads
@@ -35,6 +38,10 @@ TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
 
 # --- Admin ID for notifications ---
 ADMIN_ID = 7302005705 # Your specified admin ID
+
+# 2. Admin Notification Throttling
+ADMIN_NOTIFICATION_COOLDOWN = 300 # seconds (5 minutes)
+last_admin_notification_time = {} # Dictionary to store last notification time per user
 
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN environment variable not set. Exiting.")
@@ -96,13 +103,21 @@ def escape_markdown_v2(text: str) -> str:
 async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str) -> None:
     """Sends a notification message to the admin."""
     user_id = user_info.get('user_id', 'N/A')
+    
+    # Check cooldown before sending notification
+    current_time = time.time()
+    if user_id in last_admin_notification_time and \
+       (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDOWN:
+        logger.info(f"Admin notification for user {user_id} throttled. Last sent {current_time - last_admin_notification_time[user_id]:.2f}s ago.")
+        return
+
     first_name = user_info.get('first_name', 'N/A')
     username = user_info.get('username', 'N/A')
     chat_id = user_info.get('chat_id', 'N/A')
     chat_type = user_info.get('chat_type', 'N/A')
     
-    # Use current time of interaction
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Use current time of interaction for the message content
+    message_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Apply escape_markdown_v2 to all variables that go into the message
     # before concatenating them.
@@ -112,14 +127,14 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     escaped_chat_type = escape_markdown_v2(chat_type)
     
     notification_message = (
-        f"🔔 New User Interaction\\! 🔔\n\n" # Escaped the ! here
+        f"🔔 New User Interaction\\! 🔔\n\n"
         f"Event Type: *{escaped_event_type}*\n"
-        f"User ID: `{user_id}`\n" # User IDs are numbers, so they don't need escaping
+        f"User ID: `{user_id}`\n"
         f"First Name: *{escaped_first_name}*\n"
         f"Username: `@{escaped_username}`" if escaped_username != 'N/A' else f"Username: `N/A`\n"
-        f"Chat ID: `{chat_id}`\n" # Chat IDs are numbers, so they don't need escaping
+        f"Chat ID: `{chat_id}`\n"
         f"Chat Type: *{escaped_chat_type}*\n"
-        f"Time: `{escape_markdown_v2(current_time)}`" # Time string can have colons, so escape it too
+        f"Time: `{escape_markdown_v2(message_time)}`"
     )
     
     try:
@@ -128,6 +143,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
             text=notification_message,
             parse_mode=ParseMode.MARKDOWN_V2
         )
+        last_admin_notification_time[user_id] = current_time # Update last sent time
         logger.info(f"Admin notification sent for user {user_id} (event: {event_type}).")
     except Exception as e:
         logger.error(f"Failed to send admin notification for user {user_id}: {e}")
@@ -372,8 +388,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n" # Escaped !
-            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\."), # Escaped ! (removed the extra sentence)
+            escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
+            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\."),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
@@ -535,10 +551,32 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     temp_dir_name = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir_name, exist_ok=True)
     
+    # Loading animation setup
+    loading_emojis = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+    loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait... ")
     processing_message = await update.message.reply_text(
-        escape_markdown_v2(f"Getting your {platform} content, please wait... This might take a moment."),
+        loading_message_text + loading_emojis[0],
         parse_mode=ParseMode.MARKDOWN_V2
     )
+
+    # Flag to control the animation loop
+    animation_running = True
+    async def animate_loading():
+        index = 0
+        while animation_running:
+            try:
+                await processing_message.edit_text(
+                    loading_message_text + loading_emojis[index % len(loading_emojis)],
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                index += 1
+                await asyncio.sleep(0.5) # Update every half second
+            except Exception as e:
+                # Catch exceptions if message is deleted or inaccessible
+                logger.debug(f"Loading animation error: {e}")
+                break
+
+    animation_task = asyncio.create_task(animate_loading())
 
     downloaded_file_path = None
     try:
@@ -581,6 +619,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             info_dict = ydl.extract_info(content_url, download=False) # Get info first
             
             if info_dict.get('is_live'):
+                animation_running = False # Stop animation
+                await animation_task # Ensure the animation task finishes (or is cancelled)
                 await processing_message.edit_text(
                     escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
                     parse_mode=ParseMode.MARKDOWN_V2
@@ -596,7 +636,6 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             # Some platforms might return a generic ID, use title if available for filename to be more descriptive
             suggested_filename_base = info_dict.get('title', info_dict.get('id', 'content'))
             # Clean filename from problematic characters (e.g., / \ : * ? " < > |)
-            # FIX: Removed the duplicate 'c for c'
             suggested_filename_base = "".join(c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
             # Truncate filename if too long for filesystem limits (e.g., 255 chars)
             if len(suggested_filename_base) > 150: # Arbitrary but reasonable limit
@@ -633,6 +672,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         
         # Decide whether to send as video/audio or document based on platform and size
         if platform_key == "soundcloud": # Always send audio as document
+            animation_running = False # Stop animation
+            await animation_task # Ensure the animation task finishes (or is cancelled)
             await processing_message.edit_text(
                 escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -649,6 +690,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 )
         elif file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
             # Send as document if larger than 50MB (Telegram's send_video limit)
+            animation_running = False # Stop animation
+            await animation_task # Ensure the animation task finishes (or is cancelled)
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -665,6 +708,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 )
         else:
             # Send as video if smaller than 50MB
+            animation_running = False # Stop animation
+            await animation_task # Ensure the animation task finishes (or is cancelled)
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -707,6 +752,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif "ffmpeg is not installed" in error_message: # Specific error for FFmpeg
             user_facing_error = "FFmpeg is not installed on the server, which is required to process this video. Please inform the bot administrator."
         
+        animation_running = False # Stop animation
+        await animation_task # Ensure the animation task finishes (or is cancelled)
         await processing_message.edit_text(
             escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
                                "Please ensure the link is public and valid. Try again later."),
@@ -714,6 +761,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         )
     except FileNotFoundError as e:
         logger.error(f"File system error during {platform} download for {content_url}: {e}")
+        animation_running = False # Stop animation
+        await animation_task # Ensure the animation task finishes (or is cancelled)
         await processing_message.edit_text(
             escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
@@ -721,12 +770,22 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
+        animation_running = False # Stop animation
+        await animation_task # Ensure the animation task finishes (or is cancelled)
         await processing_message.edit_text(
             escape_markdown_v2(f"An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
                                "Please try again later. If the issue persists, contact support. "),
             parse_mode=ParseMode.MARKDOWN_V2
         )
     finally:
+        animation_running = False # Ensure animation stops even if not explicitly stopped in try/except
+        if not animation_task.done():
+            animation_task.cancel() # Cancel the task if it's still running
+            try:
+                await animation_task # Await cancellation to avoid RuntimeWarning
+            except asyncio.CancelledError:
+                pass
+
         # Clean up the temporary directory
         if os.path.exists(temp_dir_name):
             try:
