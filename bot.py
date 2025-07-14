@@ -7,7 +7,7 @@ import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
 
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton # Added ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String, UniqueConstraint
@@ -232,6 +232,20 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Call the universal download function
             await download_content_from_url(update, context, platform_in_state, url)
             return # Consume the message, don't let it fall through to other handlers if it's a URL for download
+        # Handle the new keyboard button press
+        elif update.message.text == "Download Videos/Audio":
+            # Simulate a callback query for the existing handler
+            class DummyCallbackQuery:
+                def __init__(self, message, from_user, data):
+                    self.message = message
+                    self.from_user = from_user
+                    self.data = data
+                async def answer(self):
+                    pass # Do nothing, just simulate the method
+
+            dummy_query = DummyCallbackQuery(update.message, update.message.from_user, "show_download_options")
+            await show_download_options(type('Update', (object,), {'callback_query': dummy_query})(), context)
+            return # Consume the message
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -381,17 +395,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
         await save_user_to_db(update, context) # Pass context here
-        keyboard = [
-            [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
-            [InlineKeyboardButton("Help", callback_data="help_button")]
+
+        # Inline Keyboard (still useful for specific actions or dynamic options)
+        inline_keyboard = [
+            [InlineKeyboardButton("Download Videos/Audio (Inline)", callback_data="show_download_options")],
+            [InlineKeyboardButton("Help (Inline)", callback_data="help_button")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        inline_reply_markup = InlineKeyboardMarkup(inline_keyboard)
+
+        # Regular Keyboard (persistent, appears above message input)
+        keyboard = [
+            [KeyboardButton("Download Videos/Audio")], # Text for the button
+            [KeyboardButton("Help")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
         await update.message.reply_text(
             escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
-            "To get started, tap 'Download Videos/Audio' to choose a platform, or 'Help' for more info\\."),
+            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info\\."),
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
+            reply_markup=reply_markup # Use the ReplyKeyboardMarkup here
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -400,15 +423,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message and update.message.from_user:
         await save_user_to_db(update, context)
 
+    # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
-        [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")]
+        [KeyboardButton("Download Videos/Audio")],
+        [KeyboardButton("Help")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
         escape_markdown_v2("How to use the Bot:\n\n"
         "To Download Videos and Audio:\n"
-        "- Tap the 'Download Videos/Audio' button below or use the /download command.\n"
+        "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
         "- Send the full video/audio URL when prompted.\n\n"
         "To Tag Group Members:\n"
@@ -425,27 +450,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits."),
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=reply_markup
+        reply_markup=reply_markup # Apply ReplyKeyboardMarkup here too
     )
 
 async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer() # Acknowledge the button press
+    
+    # Check if it's a callback query or a direct message from the keyboard
+    if query:
+        await query.answer() # Acknowledge the button press
+        message_to_edit = query.message
+        from_user = query.from_user
+        chat_id = query.message.chat_id
+        chat_type = query.message.chat.type
+    else: # This path is for the regular keyboard button press
+        message_to_edit = update.message
+        from_user = update.message.from_user
+        chat_id = update.message.chat_id
+        chat_type = update.message.chat.type
 
-    # Save user on callback query as well, as this is an interaction point
-    if query.message and query.from_user:
-        # Create a dummy message object for save_user_to_db
-        # This is a bit of a workaround because save_user_to_db expects update.message
-        # You could refactor save_user_to_db to take user and chat directly if preferred
-        class DummyMessage:
-            def __init__(self, from_user, chat_id, chat_type):
-                self.from_user = from_user
-                self.chat_id = chat_id
-                self.chat = type('Chat', (object,), {'type': chat_type})() # Mock chat object
-        
-        dummy_message = DummyMessage(query.from_user, query.message.chat_id, query.message.chat.type)
-        dummy_update = type('Update', (object,), {'message': dummy_message})()
-        await save_user_to_db(dummy_update, context)
+    # Save user on interaction point
+    class DummyMessage:
+        def __init__(self, from_user, chat_id, chat_type):
+            self.from_user = from_user
+            self.chat_id = chat_id
+            self.chat = type('Chat', (object,), {'type': chat_type})() # Mock chat object
+    
+    dummy_message = DummyMessage(from_user, chat_id, chat_type)
+    dummy_update = type('Update', (object,), {'message': dummy_message})()
+    await save_user_to_db(dummy_update, context)
 
     keyboard = [
         [
@@ -464,11 +497,19 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
-        escape_markdown_v2("Please choose a platform to download from:"),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=reply_markup
-    )
+    # Edit the existing message or send a new one based on the source
+    if query:
+        await message_to_edit.edit_text(
+            escape_markdown_v2("Please choose a platform to download from:"),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
+    else:
+        await message_to_edit.reply_text(
+            escape_markdown_v2("Please choose a platform to download from:"),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
 
 async def handle_download_platform_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
