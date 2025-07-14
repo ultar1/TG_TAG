@@ -92,7 +92,7 @@ async def save_user_to_db(update: Update):
     user = update.message.from_user
     chat_id = update.message.chat_id
 
-    if update.message.chat.type not in ["group", "supergroup", "private"]: # Include private chats for /tiktok
+    if update.message.chat.type not in ["group", "supergroup", "private"]:
         return
 
     session = Session()
@@ -279,7 +279,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "To use me, reply to any message in a group with `/tag`.\n"
             "I'll resend the message and mention all *known* non-admin members "
             "(those who have messaged in the group while I'm active).\n\n"
-            "✨You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n\n"
+            "✨You can also use `/tiktok <TikTok_URL>` to download TikTok videos! \n"
+            "✨Try `/fb <Facebook_URL>` for Facebook videos, or `/insta <Instagram_URL>` for Instagram! \n\n"
             "✅Make sure to turn off Group Privacy for me via @BotFather!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -295,36 +296,49 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "4. **👥To tag everyone:** Reply to any message in the group with the command `/tag`.\n"
         "I will resend the replied message and mention all known non-admin members. "
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
-        "🎥**To Download TikTok Videos:**\n"
-        "- Use the command `/tiktok <TikTok_URL>` in any chat (group or private).\n"
-        "- Provide the full TikTok video URL after the command.\n\n"
+        "🎥**To Download Videos:**\n"
+        "- Use `/tiktok <TikTok_URL>` for TikTok videos.\n"
+        "- Use `/fb <Facebook_URL>` for Facebook videos.\n"
+        "- Use `/insta <Instagram_URL>` for Instagram videos.\n"
+        "- Provide the full video URL after the command in any chat (group or private).\n\n"
         "🚫**Limitations:**\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits.\n"
-        "- TikTok download functionality relies on `yt-dlp` and may not always work if the video is restricted or TikTok changes its API, or if the file size exceeds Telegram's 2GB limit. ✨"),
+        "- Video download functionality relies on `yt-dlp` and may not always work if the video is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit. ✨"),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
-# --- TikTok Download Handler ---
+# --- Universal Video Download Handler (for TikTok, FB, Insta) ---
 
-async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Downloads a TikTok video given its URL and sends it."""
+async def download_video_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str) -> None:
+    """
+    Downloads a video from a given URL using yt-dlp and sends it.
+    Args:
+        platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram') for messaging.
+    """
     await save_user_to_db(update) # Ensure user is saved
     
     if not context.args:
         await update.message.reply_text(
-            escape_markdown_v2("Please provide a TikTok video URL after the `/tiktok` command\. \n"
-                               "Example: `/tiktok https://www.tiktok.com/@username/video/1234567890`"),
+            escape_markdown_v2(f"Please provide a {platform} video URL after the `/{platform.lower()}` command\. \n"
+                               f"Example: `/{platform.lower()} https://www.{platform.lower()}.com/video/1234567890`"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
 
-    tiktok_url = context.args[0]
+    video_url = context.args[0]
     
-    # Basic URL validation
-    if not (tiktok_url.startswith("http://") or tiktok_url.startswith("https://")) or "tiktok.com" not in tiktok_url:
+    # Basic URL validation specific to platform
+    valid_platforms = {
+        "tiktok": "tiktok.com",
+        "fb": "facebook.com",
+        "instagram": "instagram.com",
+        "insta": "instagram.com" # Alias for insta
+    }
+    
+    if not (video_url.startswith("http://") or video_url.startswith("https://")) or valid_platforms.get(platform.lower()) not in video_url:
         await update.message.reply_text(
-            escape_markdown_v2("That doesn't look like a valid TikTok URL\. Please provide a full URL\."),
+            escape_markdown_v2(f"That doesn't look like a valid {platform} URL\. Please provide a full URL\."),
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
@@ -334,7 +348,7 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     os.makedirs(temp_dir_name, exist_ok=True)
     
     processing_message = await update.message.reply_text(
-        escape_markdown_v2("⏳Getting your TikTok video, please wait... This might take a moment\. ⏳"),
+        escape_markdown_v2(f"⏳Getting your {platform} video, please wait... This might take a moment\. ⏳"),
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -344,13 +358,17 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', # Prioritize MP4
             'noplaylist': True,
-            'verbose': True, # For debugging
+            'verbose': False, # Changed to False for cleaner logs in production
             'logger': logger,
             'no_warnings': True,
+            'postprocessors': [{ # Use FFmpeg to ensure compatible MP4 for Telegram
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(tiktok_url, download=False) # Get info first
+            info_dict = ydl.extract_info(video_url, download=False) # Get info first
             if info_dict.get('is_live'):
                 await processing_message.edit_text(
                     escape_markdown_v2("🚫Sorry, I cannot download live streams\. Please provide a link to a completed video\."),
@@ -360,27 +378,42 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             # Use 'actual_ext' if available, otherwise 'ext'
             file_extension = info_dict.get('actual_ext', info_dict.get('ext', 'mp4'))
-            suggested_filename = f"{info_dict.get('id', 'video')}.{file_extension}"
-            downloaded_file_path = os.path.join(temp_dir_name, suggested_filename)
+            # Some platforms might return a generic ID, use title if available for filename to be more descriptive
+            suggested_filename_base = info_dict.get('title', info_dict.get('id', 'video'))
+            # Clean filename from problematic characters (e.g., / \ : * ? " < > |)
+            suggested_filename_base = "".join(c for c in suggested_filename_base if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            # Truncate filename if too long for filesystem limits (e.g., 255 chars)
+            if len(suggested_filename_base) > 150: # Arbitrary but reasonable limit
+                suggested_filename_base = suggested_filename_base[:150]
+            
+            suggested_filename = f"{suggested_filename_base}.{file_extension}"
+            downloaded_file_path_template = os.path.join(temp_dir_name, suggested_filename) # Use this for outtmpl
+            
+            # Re-configure outtmpl with the cleaned filename template
+            ydl_opts['outtmpl'] = downloaded_file_path_template
 
-            logger.info(f"Attempting to download {tiktok_url} to {downloaded_file_path}")
-            ydl.download([tiktok_url])
-            logger.info(f"Downloaded video to {downloaded_file_path}")
+            logger.info(f"Attempting to download {video_url} to {downloaded_file_path_template}")
+            
+            # Re-initialize YDL with updated opts, or just download if only outtmpl changed
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
+                 ydl_download.download([video_url])
+            
+            logger.info(f"Download initiated via yt-dlp to temp directory.")
 
-        if not os.path.exists(downloaded_file_path):
-            # Fallback for when yt-dlp might choose a slightly different name
-            # Find the actual downloaded file in the temp directory
-            downloaded_files = [f for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
-            if downloaded_files:
-                downloaded_file_path = os.path.join(temp_dir_name, downloaded_files[0])
-            else:
-                raise FileNotFoundError("yt-dlp did not download any file or file not found.")
+        # Find the actual downloaded file in the temp directory after download
+        downloaded_files = [f for f in os.listdir(temp_dir_name) if os.path.isfile(os.path.join(temp_dir_name, f))]
+        if not downloaded_files:
+            raise FileNotFoundError("yt-dlp did not download any file or file not found in temp directory.")
+        
+        # Take the first file, which should be the main video
+        downloaded_file_path = os.path.join(temp_dir_name, downloaded_files[0])
+
 
         file_size = os.path.getsize(downloaded_file_path) # in bytes
         logger.info(f"Downloaded file size: {file_size / (1024*1024):.2f} MB")
 
         # Get video title for caption
-        video_title = escape_markdown_v2(info_dict.get('title', 'TikTok Video'))
+        video_title = escape_markdown_v2(info_dict.get('title', f'{platform} Video'))
         
         if file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
             # Send as document if larger than 50MB (Telegram's send_video limit)
@@ -391,8 +424,8 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             with open(downloaded_file_path, 'rb') as video_file:
                 await context.bot.send_document(
                     chat_id=update.message.chat_id,
-                    document=InputFile(video_file, filename=suggested_filename),
-                    caption=f"🎥Here's your TikTok video: {video_title}",
+                    document=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
+                    caption=f"🎥Here's your {platform} video: {video_title}",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     read_timeout=300, # Increased timeout for large uploads
                     write_timeout=300, # Increased timeout for large uploads
@@ -407,8 +440,8 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             with open(downloaded_file_path, 'rb') as video_file:
                 await context.bot.send_video(
                     chat_id=update.message.chat_id,
-                    video=InputFile(video_file, filename=suggested_filename),
-                    caption=f"🎥Here's your TikTok video: {video_title}",
+                    video=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
+                    caption=f"🎥Here's your {platform} video: {video_title}",
                     parse_mode=ParseMode.MARKDOWN_V2,
                     supports_streaming=True, # Allows streaming before full download
                     read_timeout=300, 
@@ -418,27 +451,40 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         await processing_message.delete() # Remove the "processing" message
         await update.message.reply_text(
-            escape_markdown_v2("🎉Your TikTok video has been sent successfully\! Enjoy\!"),
+            escape_markdown_v2(f"🎉Your {platform} video has been sent successfully\! Enjoy\!"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
     except yt_dlp.utils.DownloadError as e:
-        logger.error(f"❌yt-dlp download error for {tiktok_url}: {e}")
+        logger.error(f"❌yt-dlp download error for {video_url} ({platform}): {e}")
         error_message = str(e)
-        if "ERROR: This video is unavailable" in error_message or "TikTok said: Video unavailable" in error_message:
+        user_facing_error = "An unexpected download error occurred."
+
+        if "ERROR: This video is unavailable" in error_message or "TikTok said: Video unavailable" in error_message or "Private video" in error_message or "This content isn't available" in error_message:
             user_facing_error = "The video might be private, removed, or region-restricted."
         elif "Unsupported URL" in error_message:
-            user_facing_error = "This URL is not supported by the downloader."
-        else:
-            user_facing_error = "An unexpected download error occurred."
+            user_facing_error = f"This URL is not supported by the downloader for {platform}."
+        elif "HTTP Error 404" in error_message:
+            user_facing_error = "The video link leads to a 404 error (not found)."
+        elif "network error" in error_message or "Connection reset by peer" in error_message:
+            user_facing_error = "A network error occurred during download. Please try again later."
+        elif "no suitable formats found" in error_message:
+            user_facing_error = "No suitable video format found for download. The video might be protected or unusual."
         
         await processing_message.edit_text(
-            escape_markdown_v2(f"❌Failed to download the TikTok video: `{escape_markdown_v2(user_facing_error)}`\n\n"
+            escape_markdown_v2(f"❌Failed to download the {platform} video: `{escape_markdown_v2(user_facing_error)}`\n\n"
                                "💡Please ensure the link is public and valid\. Try again later\. ✨"),
             parse_mode=ParseMode.MARKDOWN_V2
         )
+    except FileNotFoundError as e:
+        logger.error(f"❌File system error during {platform} download for {video_url}: {e}")
+        await processing_message.edit_text(
+            escape_markdown_v2(f"❌A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
+                               "The video might not have been downloaded correctly\. Please try again\. 😟"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
     except Exception as e:
-        logger.error(f"❌Error processing TikTok download for {tiktok_url}: {e}", exc_info=True)
+        logger.error(f"❌General error processing {platform} download for {video_url}: {e}", exc_info=True)
         await processing_message.edit_text(
             escape_markdown_v2(f"❌An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
                                "Please try again later\. If the issue persists, contact support\. 😟"),
@@ -453,6 +499,15 @@ async def tiktok_download(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except OSError as e:
                 logger.error(f"Error removing temporary directory {temp_dir_name}: {e}")
 
+# Command-specific wrappers for the universal download function
+async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await download_video_from_url(update, context, "TikTok")
+
+async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await download_video_from_url(update, context, "Facebook")
+
+async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await download_video_from_url(update, context, "Instagram")
 
 # --- Main Bot Logic and Heroku Integration ---
 def main() -> None:
@@ -463,7 +518,11 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
-    application.add_handler(CommandHandler("tiktok", tiktok_download)) # New TikTok handler
+    
+    # Register the new video download commands
+    application.add_handler(CommandHandler("tiktok", tiktok_command))
+    application.add_handler(CommandHandler("fb", fb_command))
+    application.add_handler(CommandHandler("insta", insta_command))
 
     # Message handler to record all users who send messages in a group
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, record_user_message))
@@ -476,4 +535,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
