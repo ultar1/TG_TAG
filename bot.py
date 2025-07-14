@@ -4,6 +4,7 @@ import sys
 import asyncio
 import uuid # For unique filenames
 import shutil # For removing directories
+import datetime # Import for timestamp in notification
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -31,6 +32,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True) # Create if it doesn't exist
 # Telegram's direct video upload limit (50 MB)
 TELEGRAM_VIDEO_LIMIT_MB = 50
 TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
+
+# --- Admin ID for notifications ---
+ADMIN_ID = 7302005705 # Your specified admin ID
 
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN environment variable not set. Exiting.")
@@ -89,17 +93,59 @@ def escape_markdown_v2(text: str) -> str:
         escaped_text = escaped_text.replace(char, f'\\{char}')
     return escaped_text
 
-async def save_user_to_db(update: Update):
-    """Saves or updates user information in the database."""
+async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str) -> None:
+    """Sends a notification message to the admin."""
+    user_id = user_info.get('user_id', 'N/A')
+    first_name = user_info.get('first_name', 'N/A')
+    username = user_info.get('username', 'N/A')
+    chat_id = user_info.get('chat_id', 'N/A')
+    chat_type = user_info.get('chat_type', 'N/A')
+    
+    # Use current time of interaction
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    notification_message = (
+        f"🔔 New User Interaction! 🔔\n\n"
+        f"Event Type: *{escape_markdown_v2(event_type)}*\n"
+        f"User ID: `{user_id}`\n"
+        f"First Name: *{escape_markdown_v2(first_name)}*\n"
+        f"Username: `@{escape_markdown_v2(username)}`" if username != 'N/A' else f"Username: `N/A`\n"
+        f"Chat ID: `{chat_id}`\n"
+        f"Chat Type: *{escape_markdown_v2(chat_type)}*\n"
+        f"Time: `{current_time}`"
+    )
+    
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=notification_message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logger.info(f"Admin notification sent for user {user_id} (event: {event_type}).")
+    except Exception as e:
+        logger.error(f"Failed to send admin notification for user {user_id}: {e}")
+
+
+async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Saves or updates user information in the database and sends admin notification."""
     user = update.message.from_user
     chat_id = update.message.chat_id
+    chat_type = update.message.chat.type
 
-    if update.message.chat.type not in ["group", "supergroup", "private"]:
+    if chat_type not in ["group", "supergroup", "private"]:
         return
 
     session = Session()
     try:
         existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
+        user_info = {
+            'user_id': user.id,
+            'first_name': user.first_name,
+            'username': user.username,
+            'chat_id': chat_id,
+            'chat_type': chat_type
+        }
+
         if not existing_user:
             new_user = User(
                 user_id=user.id,
@@ -110,20 +156,36 @@ async def save_user_to_db(update: Update):
             session.add(new_user)
             session.commit()
             logger.info(f"DB: Added user {user.id} ({user.first_name}) for chat {chat_id}")
+            await send_notification_to_admin(context, user_info, "New User Added")
         else:
-            if (existing_user.first_name != user.first_name or
-                existing_user.username != user.username):
+            # Check if any info changed to avoid unnecessary DB writes and notifications
+            info_changed = False
+            if existing_user.first_name != user.first_name:
                 existing_user.first_name = user.first_name
+                info_changed = True
+            if existing_user.username != user.username:
                 existing_user.username = user.username
+                info_changed = True
+            
+            if info_changed:
                 session.commit()
                 logger.info(f"DB: Updated user {user.id} ({user.first_name}) for chat {chat_id}")
+                await send_notification_to_admin(context, user_info, "User Info Updated")
+            else:
+                logger.info(f"DB: User {user.id} ({user.first_name}) already exists and no info changed for chat {chat_id}. Not updating.")
+                # Send a general interaction notification even if user info didn't change
+                await send_notification_to_admin(context, user_info, "User Interacted")
 
     except IntegrityError:
         session.rollback()
         logger.warning(f"DB: User {user.id} already exists (race condition) for chat {chat_id}. Rolling back.")
+        # Still send notification if it's a known user interacting for the first time in this session
+        await send_notification_to_admin(context, user_info, "User Interacted (Race Condition)")
     except Exception as e:
         session.rollback()
         logger.error(f"DB: Error saving/updating user {user.id} for chat {chat_id}: {e}")
+        user_info['error'] = str(e)
+        await send_notification_to_admin(context, user_info, f"Database Error: {e}")
     finally:
         session.close()
 
@@ -131,7 +193,7 @@ async def save_user_to_db(update: Update):
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler for all messages to record user info, excluding commands."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update)
+        await save_user_to_db(update, context) # Pass context here
     
     # Check if the user is in a state awaiting a URL
     if update.message and update.message.text:
@@ -171,6 +233,10 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return
+
+    # Call save_user_to_db here to ensure the command user is recorded and notification sent
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
 
     feedback_message = await update.message.reply_text(
         escape_markdown_v2("Fetching user list and preparing mentions, please wait..."),
@@ -290,7 +356,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and saves the user."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update)
+        await save_user_to_db(update, context) # Pass context here
         keyboard = [
             [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")],
             [InlineKeyboardButton("Help", callback_data="help_button")]
@@ -307,6 +373,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
+    # Ensure user is saved and notification sent if this is a direct /help command
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+
     keyboard = [
         [InlineKeyboardButton("Download Videos/Audio", callback_data="show_download_options")]
     ]
@@ -339,6 +409,21 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer() # Acknowledge the button press
 
+    # Save user on callback query as well, as this is an interaction point
+    if query.message and query.from_user:
+        # Create a dummy message object for save_user_to_db
+        # This is a bit of a workaround because save_user_to_db expects update.message
+        # You could refactor save_user_to_db to take user and chat directly if preferred
+        class DummyMessage:
+            def __init__(self, from_user, chat_id, chat_type):
+                self.from_user = from_user
+                self.chat_id = chat_id
+                self.chat = type('Chat', (object,), {'type': chat_type})() # Mock chat object
+        
+        dummy_message = DummyMessage(query.from_user, query.message.chat_id, query.message.chat.type)
+        dummy_update = type('Update', (object,), {'message': dummy_message})()
+        await save_user_to_db(dummy_update, context)
+
     keyboard = [
         [
             InlineKeyboardButton("TikTok", callback_data="download_platform:TikTok"),
@@ -366,6 +451,18 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
     query = update.callback_query
     await query.answer() # Acknowledge the button press
     
+    # Save user on callback query as well
+    if query.message and query.from_user:
+        class DummyMessage:
+            def __init__(self, from_user, chat_id, chat_type):
+                self.from_user = from_user
+                self.chat_id = chat_id
+                self.chat = type('Chat', (object,), {'type': chat_type})()
+        
+        dummy_message = DummyMessage(query.from_user, query.message.chat_id, query.message.chat.type)
+        dummy_update = type('Update', (object,), {'message': dummy_message})()
+        await save_user_to_db(dummy_update, context)
+
     # Parse the callback data: "download_platform:PLATFORM_NAME"
     platform_name = query.data.split(":")[1]
     
@@ -388,10 +485,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         platform (str): The platform (e.g., 'TikTok', 'Facebook', 'Instagram', 'Pinterest', 'Twitter', 'YouTube', 'SoundCloud') for messaging.
         content_url (str): The URL to download.
     """
-    await save_user_to_db(update) # Ensure user is saved
-    
-    # The URL is now passed directly from the message handler, not context.args
-    # No need for this check here: if not context.args:
+    # save_user_to_db already called by record_user_message before this function
     
     # Basic URL validation specific to platform
     valid_platforms = {
@@ -402,7 +496,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be", "youtu.be", "m.youtube.com"], # Updated YouTube domains
+        "youtube": ["youtube.com", "youtu.be"], # Simplified YouTube domains for common URLs
         "soundcloud": "soundcloud.com"
     }
     
@@ -559,7 +653,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     parse_mode=ParseMode.MARKDOWN_V2,
                     read_timeout=300, # Increased timeout for large uploads
                     write_timeout=300, # Increased timeout for large uploads
-                    connect_timeout=300 # Increased timeout for large uploads
+                    connect_timeout=300
                 )
         else:
             # Send as video if smaller than 50MB
@@ -639,56 +733,72 @@ async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # If called directly as /tiktok <URL> this will work.
     # If called via button flow, content_url will be None, and the record_user_message handles it.
     if context.args:
+        # Ensure user is saved and notification sent
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "TikTok", context.args[0])
     else:
+        # Ensure user is saved and notification sent even if command is incomplete
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "Facebook", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "Instagram", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def pinterest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "Pinterest", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "Twitter", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "YouTube", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
+        await save_user_to_db(update, context)
         await download_content_from_url(update, context, "SoundCloud", context.args[0])
     else:
+        await save_user_to_db(update, context)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
