@@ -25,11 +25,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- HARDCODED SENSITIVE INFORMATION (LESS SECURE) ---
+# I've hardcoded these back as per your explicit request.
+# WARNING: This is generally NOT recommended for production environments due to security risks.
 BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y" # Your Bot Token
 GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
-# Load DATABASE_URL from environment variable (still good practice for DB credentials)
+# DATABASE_URL is still loaded from environment variable as it's crucial for Heroku Postgres
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # --- Validation for hardcoded values (still good practice) ---
@@ -41,9 +43,11 @@ if not GEMINI_API_KEY:
     logger.critical("GEMINI_API_KEY is not set. Exiting.")
     sys.exit(1)
 
-# Ensure ADMIN_ID is an integer if it's hardcoded as one, or keep it as None if not set
-if ADMIN_ID is None: # This check is only relevant if ADMIN_ID could potentially be not set, but now it's hardcoded.
-    logger.warning("ADMIN_ID is hardcoded but its usage will proceed. Admin notifications will function.")
+# ADMIN_ID is hardcoded now, so no need for environment variable check here
+# However, you could add a type check if you want to be extra robust.
+if not isinstance(ADMIN_ID, int):
+    logger.critical("ADMIN_ID must be an integer. Exiting.")
+    sys.exit(1)
 
 
 # Adjust DATABASE_URL for SQLAlchemy 2.0 compatibility with Heroku Postgres
@@ -130,7 +134,7 @@ def escape_markdown_v2(text: str) -> str:
 
 async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str, button_pressed: str = None, event_details: str = None) -> None:
     """Sends a notification message to the admin, with optional button and details."""
-    if ADMIN_ID is None: # Do not send if ADMIN_ID is not set
+    if ADMIN_ID is None: # Do not send if ADMIN_ID is not set (e.g., if set to None intentionally)
         return
         
     user_id = user_info.get('user_id', 'N/A')
@@ -1158,7 +1162,8 @@ def main() -> None:
     application.add_handler(CommandHandler("pinterest", pinterest_command))
     application.add_handler(CommandHandler("twitter", twitter_command))
     application.add_handler(CommandHandler("youtube", youtube_command))
-    application.add_handler(CommandHandler("soundcloud", soundcloud_command))
+    application.add_handler(CommandHandler(
+        "soundcloud", soundcloud_command))
 
     # --- IMPORTANT: Order matters here! Specific handlers first. ---
 
