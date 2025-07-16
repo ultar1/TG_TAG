@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # --- HARDCODED SENSITIVE INFORMATION (LESS SECURE) ---
 # I've hardcoded these back as per your explicit request.
 # WARNING: This is generally NOT recommended for production environments due to security risks.
-BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y" # Your Bot Token
+BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
 GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
