@@ -15,8 +15,8 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
-# --- Gemini API Integration ---
-import google.generativeai as genai
+# --- OpenAI API Integration ---
+import openai # CHANGED: Imported openai instead of google.generativeai
 
 # --- Configuration ---
 logging.basicConfig(
@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 # --- HARDCODED SENSITIVE INFORMATION (LESS SECURE) ---
 # I've hardcoded these back as per your explicit request.
 # WARNING: This is generally NOT recommended for production environments due to security risks.
-BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
-GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
+BOT_TOKEN = "7806461656:AAEFsYfKk2moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
+# CHANGED: Replaced GEMINI_API_KEY with OPENAI_API_KEY
+OPENAI_API_KEY = "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # Your OpenAI API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
 # DATABASE_URL is still loaded from environment variable as it's crucial for Heroku Postgres
@@ -39,8 +40,9 @@ if not BOT_TOKEN:
     logger.critical("BOT_TOKEN is not set. Exiting.")
     sys.exit(1)
 
-if not GEMINI_API_KEY:
-    logger.critical("GEMINI_API_KEY is not set. Exiting.")
+# CHANGED: Check OPENAI_API_KEY instead of GEMINI_API_KEY
+if not OPENAI_API_KEY:
+    logger.critical("OPENAI_API_KEY is not set. Exiting.")
     sys.exit(1)
 
 # ADMIN_ID is hardcoded now, so no need for environment variable check here
@@ -59,33 +61,18 @@ else:
     sys.exit(1)
 
 
-# Configure Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
+# Configure OpenAI API
+# CHANGED: Used openai.OpenAI client for API calls
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# --- FIX: Dynamically select an appropriate Gemini model ---
-def get_suitable_gemini_model():
-    """
-    Attempts to find a Gemini model suitable for text generation.
-    Prioritizes 'gemini-pro' but falls back to others if not found.
-    """
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            if m.name == 'models/gemini-pro':
-                logger.info("Found 'gemini-pro' model.")
-                return m.name
-            elif 'gemini' in m.name: # Fallback to any other 'gemini' model
-                logger.warning(f"Could not find 'gemini-pro'. Falling back to {m.name}.")
-                return m.name
-    logger.critical("No suitable Gemini model found that supports 'generateContent'.")
-    sys.exit(1)
+# Define the GPT model to use
+# CHANGED: Specify an OpenAI GPT model
+OPENAI_MODEL_NAME = "gpt-4o" # You can choose "gpt-3.5-turbo" for lower cost/faster, or "gpt-4o" for better quality
 
-# Call the function to get the model name at startup
-GEMINI_MODEL_NAME = get_suitable_gemini_model()
-GEMINI_MODEL = genai.GenerativeModel(GEMINI_MODEL_NAME)
-
-# Dictionary to store ongoing Gemini conversations (for stateful chat)
-# {user_id: conversation_object}
-gemini_conversations = {}
+# Dictionary to store ongoing OpenAI conversations (for stateful chat)
+# Stores history as a list of dictionaries in the format [{role: ..., content: ...}]
+# {user_id: [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Hello!"}]}
+openai_conversations = {}
 
 # Define a temporary directory for downloads
 # On Heroku, this will be in the ephemeral filesystem
@@ -132,7 +119,8 @@ MAX_MENTIONS_PER_MESSAGE = 50
 MAX_MESSAGE_LENGTH = 4096
 
 # --- User States for conversational flow ---
-GEMINI_STATE = 'gemini_chat'
+# CHANGED: Renamed state for clarity
+GPT_STATE = 'gpt_chat'
 AWAITING_URL_STATE = 'awaiting_url'
 # Add other states as needed, e.g., 'normal' or None for default behavior
 
@@ -141,7 +129,7 @@ def escape_html(text: str) -> str:
     """Escapes HTML special characters to prevent issues with ParseMode.HTML."""
     if not isinstance(text, str):
         text = str(text)
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return text.replace("&", "&").replace("<", "<").replace(">", ">").replace('"', """)
 
 async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str, button_pressed: str = None, event_details: str = None) -> None:
     """Sends a notification message to the admin, with optional button and details."""
@@ -287,7 +275,7 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, bu
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handler for messages that are NOT commands, NOT specific keyboard button texts,
-    and are potentially URLs for download based on user state or Gemini chat.
+    and are potentially URLs for download based on user state or GPT chat.
     It also saves user info for general interactions.
     """
     if not update.message or not update.message.text:
@@ -302,23 +290,29 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.message.from_user.id
     user_message = update.message.text
 
-    # Check if the user is in Gemini chat state
-    if user_data.get('state') == GEMINI_STATE:
-        if user_id not in gemini_conversations:
+    # Check if the user is in GPT chat state
+    # CHANGED: Referencing GPT_STATE
+    if user_data.get('state') == GPT_STATE:
+        if user_id not in openai_conversations:
             # This should ideally not happen if state is correctly managed, but good for robustness
-            gemini_conversations[user_id] = GEMINI_MODEL.start_chat(history=[])
-            logger.warning(f"Gemini conversation not found for user {user_id} in GEMINI_STATE, initializing new one.")
+            # CHANGED: Initialize with a system message for OpenAI API
+            openai_conversations[user_id] = [{"role": "system", "content": "You are a helpful assistant."}]
+            logger.warning(f"GPT conversation not found for user {user_id} in GPT_STATE, initializing new one.")
 
-        # Loading animation setup for Gemini response
+        # Add user message to conversation history
+        openai_conversations[user_id].append({"role": "user", "content": user_message})
+
+        # Loading animation setup for GPT response
         loading_emojis = ["...", ". . .", "...."] # No emojis, just dots
-        loading_message_text = escape_html("Gemini is thinking")
+        # CHANGED: "GPT is thinking"
+        loading_message_text = escape_html("GPT is thinking")
         processing_message = await update.message.reply_text(
             loading_message_text + loading_emojis[0],
             parse_mode=ParseMode.HTML
         )
 
         animation_running = True
-        async def animate_loading_gemini():
+        async def animate_loading_gpt():
             index = 0
             while animation_running:
                 try:
@@ -329,45 +323,62 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     index += 1
                     await asyncio.sleep(1) # Slower animation for AI thinking
                 except Exception as e:
-                    logger.debug(f"Gemini loading animation error: {e}")
+                    logger.debug(f"GPT loading animation error: {e}")
                     break
 
-        animation_task = asyncio.create_task(animate_loading_gemini())
+        animation_task = asyncio.create_task(animate_loading_gpt())
 
         try:
-            # Send message to Gemini
-            response = await asyncio.to_thread(gemini_conversations[user_id].send_message, user_message)
-            gemini_text_response = response.text
+            # Send message to OpenAI API
+            # CHANGED: Use openai_client.chat.completions.create
+            response = await asyncio.to_thread(
+                openai_client.chat.completions.create,
+                model=OPENAI_MODEL_NAME,
+                messages=openai_conversations[user_id]
+            )
             
-            # Escape Gemini's response for HTML
-            escaped_gemini_response = escape_html(gemini_text_response)
+            gpt_text_response = response.choices[0].message.content
+            
+            # Add assistant's response to conversation history
+            openai_conversations[user_id].append({"role": "assistant", "content": gpt_text_response})
+            
+            # Escape GPT's response for HTML
+            escaped_gpt_response = escape_html(gpt_text_response)
 
             animation_running = False # Stop animation
             await animation_task # Ensure the animation task finishes
             
             await processing_message.edit_text(
-                escaped_gemini_response,
+                escaped_gpt_response,
                 parse_mode=ParseMode.HTML
             )
-            logger.info(f"Gemini replied to user {user_id}: {gemini_text_response[:50]}...") # Log first 50 chars
-        except genai.types.BlockedPromptException as e:
-            logger.warning(f"Gemini prompt blocked for user {user_id}: {e.response.prompt_feedback}")
+            logger.info(f"GPT replied to user {user_id}: {gpt_text_response[:50]}...") # Log first 50 chars
+        except openai.APIErrors.RateLimitError as e:
+            logger.warning(f"OpenAI rate limit hit for user {user_id}: {e}")
             animation_running = False
             if not animation_task.done(): animation_task.cancel(); await animation_task
             await processing_message.edit_text(
-                escape_html("I'm sorry, I cannot respond to that query. It might violate content policies. Please try asking something else."),
+                escape_html("I'm experiencing high traffic right now. Please try again in a moment."),
                 parse_mode=ParseMode.HTML
             )
-        except genai.types.StopCandidateException as e:
-            logger.warning(f"Gemini response stopped mid-generation for user {user_id}: {e}")
+        except openai.APIErrors.AuthenticationError as e:
+            logger.critical(f"OpenAI authentication error for user {user_id}: {e}")
             animation_running = False
             if not animation_task.done(): animation_task.cancel(); await animation_task
             await processing_message.edit_text(
-                escape_html("Gemini stopped generating a response. Please try rephrasing your question."),
+                escape_html("There's an issue with my API key. Please contact the bot administrator."),
+                parse_mode=ParseMode.HTML
+            )
+        except openai.APIErrors.APIError as e:
+            logger.error(f"OpenAI API error for user {user_id}: {e}", exc_info=True)
+            animation_running = False
+            if not animation_task.done(): animation_task.cancel(); await animation_task
+            await processing_message.edit_text(
+                escape_html("I'm sorry, I encountered an issue with the OpenAI API. Please try again later."),
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            logger.error(f"Error during Gemini chat for user {user_id}: {e}", exc_info=True)
+            logger.error(f"Error during GPT chat for user {user_id}: {e}", exc_info=True)
             animation_running = False # Stop animation
             if not animation_task.done():
                 animation_task.cancel()
@@ -375,10 +386,10 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_html("I'm sorry, I couldn't process your request with Gemini right now. Please try again later."),
+                escape_html("I'm sorry, I couldn't process your request with GPT right now. Please try again later."),
                 parse_mode=ParseMode.HTML
             )
-        return # Consume the message if it's a Gemini chat interaction
+        return # Consume the message if it's a GPT chat interaction
 
     # Check if the user is in a state awaiting a URL
     if user_data.get('state') == AWAITING_URL_STATE and user_data.get('platform'):
@@ -393,13 +404,14 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await download_content_from_url(update, context, platform_in_state, url)
         return # Consume the message if it's a URL for download
 
-    # If it's not a URL for download or a Gemini chat, it's just a regular message.
+    # If it's not a URL for download or a GPT chat, it's just a regular message.
     # Provide a default "I didn't understand" message with the main keyboard.
     await update.message.reply_text(
         escape_html("I didn't understand that. Please use the buttons below to interact with me, or send a valid URL after selecting a download option."),
         parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardMarkup(
-            [[KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")], [KeyboardButton("Help")]],
+            # CHANGED: "GPT" button
+            [[KeyboardButton("Download Videos/Audio"), KeyboardButton("GPT")], [KeyboardButton("Help")]],
             one_time_keyboard=False,
             resize_keyboard=True
         )
@@ -422,56 +434,67 @@ async def handle_keyboard_help_button(update: Update, context: ContextTypes.DEFA
     # Call the existing help_command logic
     await help_command(update, context)
 
-async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Gemini' keyboard button press."""
+# CHANGED: Renamed function from handle_keyboard_gemini_button to handle_keyboard_gpt_button
+async def handle_keyboard_gpt_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'GPT' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context, button_pressed="Gemini")
+        # CHANGED: Button pressed name
+        await save_user_to_db(update, context, button_pressed="GPT")
 
     user_id = update.message.from_user.id
 
-    # Set user state to Gemini chat
-    context.user_data['state'] = GEMINI_STATE
+    # Set user state to GPT chat
+    # CHANGED: Setting GPT_STATE
+    context.user_data['state'] = GPT_STATE
     
     # Initialize a new conversation or get existing one
-    if user_id not in gemini_conversations:
-        gemini_conversations[user_id] = GEMINI_MODEL.start_chat(history=[])
-        logger.info(f"Started new Gemini conversation for user {user_id}")
+    if user_id not in openai_conversations:
+        # CHANGED: Initialize conversation history with a system message for OpenAI
+        openai_conversations[user_id] = [{"role": "system", "content": "You are a helpful assistant."}]
+        logger.info(f"Started new GPT conversation for user {user_id}")
     else:
-        logger.info(f"Resuming Gemini conversation for user {user_id}")
+        logger.info(f"Resuming GPT conversation for user {user_id}")
     
-    # Provide options to exit Gemini chat
-    keyboard = [[KeyboardButton("Exit Gemini Chat")]]
+    # Provide options to exit GPT chat
+    # CHANGED: "Exit GPT Chat" button
+    keyboard = [[KeyboardButton("Exit GPT Chat")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_html("Hello! I'm Gemini. I'm ready to chat with you.\n\n"
+        # CHANGED: Welcome message for GPT
+        escape_html("Hello! I'm GPT. I'm ready to chat with you.\n\n"
                            "What's on your mind today? Ask me anything!"),
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
 
-async def handle_exit_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Exit Gemini Chat' keyboard button press."""
+# CHANGED: Renamed function from handle_exit_gemini_button to handle_exit_gpt_button
+async def handle_exit_gpt_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Exit GPT Chat' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context, button_pressed="Exit Gemini Chat")
+        # CHANGED: Button pressed name
+        await save_user_to_db(update, context, button_pressed="Exit GPT Chat")
 
     user_id = update.message.from_user.id
     context.user_data['state'] = None # Clear state
     
     # Remove conversation history
-    if user_id in gemini_conversations:
-        del gemini_conversations[user_id]
-        logger.info(f"Ended Gemini conversation for user {user_id}")
+    # CHANGED: Referencing openai_conversations
+    if user_id in openai_conversations:
+        del openai_conversations[user_id]
+        logger.info(f"Ended GPT conversation for user {user_id}")
 
     # Restore main keyboard
     keyboard = [
-        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")],
+        # CHANGED: "GPT" button
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("GPT")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_html("You've exited Gemini chat. How can I help you further?"),
+        # CHANGED: Exit message
+        escape_html("You've exited GPT chat. How can I help you further?"),
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
@@ -628,15 +651,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Regular Keyboard (persistent, appears above message input)
         keyboard = [
-            [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")], # Added Gemini button
+            # CHANGED: "GPT" button
+            [KeyboardButton("Download Videos/Audio"), KeyboardButton("GPT")],
             [KeyboardButton("Help")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
         await update.message.reply_text(
+            # CHANGED: Welcome message updated for GPT
             escape_html("Hi there! I'm your multimedia download and group tagging bot.\n\n"
             "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info. "
-            "You can also chat with Gemini for anything else you need!"), # Updated welcome message
+            "You can also chat with GPT for anything else you need!"),
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
@@ -653,7 +678,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
-        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")],
+        # CHANGED: "GPT" button
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("GPT")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
@@ -663,10 +689,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
         "- Send the full video/audio URL when prompted.\n\n"
-        "To Chat with Gemini (AI):\n"
-        "- Tap the 'Gemini' button on your keyboard.\n"
+        "To Chat with GPT (AI):\n" # CHANGED: Mention GPT instead of Gemini
+        "- Tap the 'GPT' button on your keyboard.\n"
         "- Ask me anything you want! I'll try my best to answer.\n"
-        "- To exit the conversation, tap the 'Exit Gemini Chat' button.\n\n"
+        "- To exit the conversation, tap the 'Exit GPT Chat' button.\n\n"
         "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
         "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> <b>Turn off</b>.\n"
@@ -1187,8 +1213,9 @@ def main() -> None:
     # Use filters.Regex to match the exact button text.
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
+    # CHANGED: Replaced Gemini button handlers with GPT
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^GPT$"), handle_keyboard_gpt_button)) # NEW: GPT button
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Exit GPT Chat$"), handle_exit_gpt_button)) # NEW: Exit GPT button
 
     # 2. Callback Query Handlers for inline buttons
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
@@ -1197,7 +1224,7 @@ def main() -> None:
 
     # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
     # This handler will also save user info and handle URLs when in 'awaiting_url' state.
-    # It now also handles Gemini conversations based on user state.
+    # It now also handles GPT conversations based on user state.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
