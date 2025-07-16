@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # --- HARDCODED SENSITIVE INFORMATION (LESS SECURE) ---
 # I've hardcoded these back as per your explicit request.
 # WARNING: This is generally NOT recommended for production environments due to security risks.
-BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
+BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y" # Your Bot Token
 GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
@@ -121,13 +121,14 @@ AWAITING_URL_STATE = 'awaiting_url'
 def escape_markdown_v2(text: str) -> str:
     """Escapes common MarkdownV2 special characters."""
     if not isinstance(text, str):
-        return ""
+        # Convert non-string types (like int, float) to string before escaping
+        text = str(text)
     
     # Correct list of special characters for MarkdownV2, including backslash itself to be handled first.
+    # The order matters: escape backslash first, then other chars.
     special_chars = r'_*[]()~`>#+-=|{}.!'
     
-    # Process backslashes first, then other special characters
-    escaped_text = text.replace('\\', '\\\\')
+    escaped_text = text.replace('\\', '\\\\') # Escape backslashes first
     for char in special_chars:
         escaped_text = escaped_text.replace(char, f'\\{char}')
     return escaped_text
@@ -154,7 +155,8 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Use current time of interaction for the message content
     message_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Apply escape_markdown_v2 to all variables that go into the message
+    # Apply escape_markdown_v2 to ALL dynamic variables that go into the message content,
+    # ESPECIALLY if they are inside `code blocks` or `links`.
     escaped_event_type = escape_markdown_v2(event_type)
     escaped_first_name = escape_markdown_v2(first_name)
     escaped_username = escape_markdown_v2(username) if username and username != 'N/A' else 'N/A'
@@ -162,15 +164,22 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     escaped_button_pressed = escape_markdown_v2(button_pressed) if button_pressed else 'N/A'
     escaped_event_details = escape_markdown_v2(event_details) if event_details else 'N/A'
 
+    # The user_id, chat_id, and message_time are wrapped in backticks,
+    # so their *values* need to be escaped *before* being placed in the f-string.
+    # The `escape_markdown_v2` function now handles non-string inputs by converting them.
+    escaped_user_id = escape_markdown_v2(user_id)
+    escaped_chat_id = escape_markdown_v2(chat_id)
+    escaped_message_time = escape_markdown_v2(message_time)
+
     notification_message = (
         f"New User Interaction!\n\n"
         f"Event Type: *{escaped_event_type}*\n"
-        f"User ID: `{user_id}`\n"
+        f"User ID: `{escaped_user_id}`\n" # Use escaped value
         f"First Name: *{escaped_first_name}*\n"
         f"Username: `@{escaped_username}`" if escaped_username != 'N/A' else f"Username: `N/A`\n"
-        f"Chat ID: `{chat_id}`\n"
+        f"Chat ID: `{escaped_chat_id}`\n" # Use escaped value
         f"Chat Type: *{escaped_chat_type}*\n"
-        f"Time: `{escape_markdown_v2(message_time)}`\n"
+        f"Time: `{escaped_message_time}`\n" # Use escaped value
     )
     if button_pressed and button_pressed != 'N/A':
         notification_message += f"Button Pressed: *{escaped_button_pressed}*\n"
