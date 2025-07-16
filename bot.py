@@ -61,8 +61,27 @@ else:
 
 # Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
-# For text-only generation, use the 'gemini-pro' model
-GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
+
+# --- FIX: Dynamically select an appropriate Gemini model ---
+def get_suitable_gemini_model():
+    """
+    Attempts to find a Gemini model suitable for text generation.
+    Prioritizes 'gemini-pro' but falls back to others if not found.
+    """
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            if m.name == 'models/gemini-pro':
+                logger.info("Found 'gemini-pro' model.")
+                return m.name
+            elif 'gemini' in m.name: # Fallback to any other 'gemini' model
+                logger.warning(f"Could not find 'gemini-pro'. Falling back to {m.name}.")
+                return m.name
+    logger.critical("No suitable Gemini model found that supports 'generateContent'.")
+    sys.exit(1)
+
+# Call the function to get the model name at startup
+GEMINI_MODEL_NAME = get_suitable_gemini_model()
+GEMINI_MODEL = genai.GenerativeModel(GEMINI_MODEL_NAME)
 
 # Dictionary to store ongoing Gemini conversations (for stateful chat)
 # {user_id: conversation_object}
@@ -146,7 +165,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Use current time of interaction for the message content
     message_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Apply escape_html to all dynamic variables
+    # Apply escape_html to ALL dynamic variables that go into the message content
     escaped_event_type = escape_html(event_type)
     escaped_first_name = escape_html(first_name)
     escaped_username = escape_html(username) if username and username != 'N/A' else 'N/A'
@@ -154,7 +173,6 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     escaped_button_pressed = escape_html(button_pressed) if button_pressed else 'N/A'
     escaped_event_details = escape_html(event_details) if event_details else 'N/A'
 
-    # The `escape_html` function handles non-string inputs by converting them.
     escaped_user_id = escape_html(user_id)
     escaped_chat_id = escape_html(chat_id)
     escaped_message_time = escape_html(message_time)
