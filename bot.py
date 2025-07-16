@@ -10,10 +10,9 @@ import time # Import for time-based notification throttling
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, UniqueConstraint
+from sqlalchemy import create_engine, Column, UniqueConstraint, String, BigInteger # FIX: Import String and BigInteger
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.types import BigInteger
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
 # --- Gemini API Integration ---
@@ -25,39 +24,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load sensitive information from environment variables
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# --- HARDCODED SENSITIVE INFORMATION (LESS SECURE) ---
+BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y" # Your Bot Token
+GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
+ADMIN_ID = 7302005705 # Your specified admin ID
+
+# Load DATABASE_URL from environment variable (still good practice for DB credentials)
 DATABASE_URL = os.environ.get("DATABASE_URL")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_ID_STR = os.environ.get("ADMIN_ID") # Get ADMIN_ID as string first
 
-# Validate essential environment variables
+# --- Validation for hardcoded values (still good practice) ---
 if not BOT_TOKEN:
-    logger.critical("BOT_TOKEN environment variable not set. Exiting.")
-    sys.exit(1)
-
-if not DATABASE_URL:
-    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    logger.critical("BOT_TOKEN is not set. Exiting.")
     sys.exit(1)
 
 if not GEMINI_API_KEY:
-    logger.critical("GEMINI_API_KEY not set in environment variables. Exiting.")
+    logger.critical("GEMINI_API_KEY is not set. Exiting.")
     sys.exit(1)
 
-ADMIN_ID = None
-if ADMIN_ID_STR:
-    try:
-        ADMIN_ID = int(ADMIN_ID_STR)
-        logger.info(f"Admin ID loaded: {ADMIN_ID}")
-    except ValueError:
-        logger.error(f"Invalid ADMIN_ID format in environment variables: '{ADMIN_ID_STR}'. Must be an integer.")
-else:
-    logger.warning("ADMIN_ID environment variable not set. Admin notifications will be disabled.")
+# Ensure ADMIN_ID is an integer if it's hardcoded as one, or keep it as None if not set
+if ADMIN_ID is None: # This check is only relevant if ADMIN_ID could potentially be not set, but now it's hardcoded.
+    logger.warning("ADMIN_ID is hardcoded but its usage will proceed. Admin notifications will function.")
 
 
 # Adjust DATABASE_URL for SQLAlchemy 2.0 compatibility with Heroku Postgres
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if DATABASE_URL: # Only replace if DATABASE_URL exists
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+else:
+    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    sys.exit(1)
+
 
 # Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
@@ -86,7 +82,6 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
-    # Changed Integer to BigInteger for user_id and chat_id to prevent NumericValueOutOfRange
     user_id = Column(BigInteger, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
@@ -1154,4 +1149,39 @@ def main() -> None:
     # Command Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add
+    application.add_handler(CommandHandler("tag", tag_all))
+    
+    # Register the command handlers for explicit /command <url> usage (if desired, currently prompts)
+    application.add_handler(CommandHandler("tiktok", tiktok_command))
+    application.add_handler(CommandHandler("fb", fb_command))
+    application.add_handler(CommandHandler("insta", insta_command))
+    application.add_handler(CommandHandler("pinterest", pinterest_command))
+    application.add_handler(CommandHandler("twitter", twitter_command))
+    application.add_handler(CommandHandler("youtube", youtube_command))
+    application.add_handler(CommandHandler("soundcloud", soundcloud_command))
+
+    # --- IMPORTANT: Order matters here! Specific handlers first. ---
+
+    # 1. Specific Message Handlers for Keyboard Buttons
+    # Use filters.Regex to match the exact button text.
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
+
+    # 2. Callback Query Handlers for inline buttons
+    application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
+    application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
+    application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$"))
+
+    # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
+    # This handler will also save user info and handle URLs when in 'awaiting_url' state.
+    # It now also handles Gemini conversations based on user state.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
+    
+    logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
+
