@@ -9,7 +9,7 @@ import time # Import for time-based notification throttling
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode # Still needed for ParseMode.HTML
 from sqlalchemy import create_engine, Column, UniqueConstraint, String, BigInteger # FIX: Import String and BigInteger
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # I've hardcoded these back as per your explicit request.
 # WARNING: This is generally NOT recommended for production environments due to security risks.
 BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
-GEMINI_API_KEY = "AIzaSyDsvDW-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
+GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
 # DATABASE_URL is still loaded from environment variable as it's crucial for Heroku Postgres
@@ -118,20 +118,11 @@ AWAITING_URL_STATE = 'awaiting_url'
 # Add other states as needed, e.g., 'normal' or None for default behavior
 
 # --- Helper Functions ---
-def escape_markdown_v2(text: str) -> str:
-    """Escapes common MarkdownV2 special characters."""
+def escape_html(text: str) -> str:
+    """Escapes HTML special characters to prevent issues with ParseMode.HTML."""
     if not isinstance(text, str):
-        # Convert non-string types (like int, float) to string before escaping
         text = str(text)
-    
-    # Correct list of special characters for MarkdownV2, including backslash itself to be handled first.
-    # The order matters: escape backslash first, then other chars.
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    
-    escaped_text = text.replace('\\', '\\\\') # Escape backslashes first
-    for char in special_chars:
-        escaped_text = escaped_text.replace(char, f'\\{char}')
-    return escaped_text
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str, button_pressed: str = None, event_details: str = None) -> None:
     """Sends a notification message to the admin, with optional button and details."""
@@ -155,44 +146,41 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Use current time of interaction for the message content
     message_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Apply escape_markdown_v2 to ALL dynamic variables that go into the message content,
-    # ESPECIALLY if they are inside `code blocks` or `links`.
-    escaped_event_type = escape_markdown_v2(event_type)
-    escaped_first_name = escape_markdown_v2(first_name)
-    escaped_username = escape_markdown_v2(username) if username and username != 'N/A' else 'N/A'
-    escaped_chat_type = escape_markdown_v2(chat_type)
-    escaped_button_pressed = escape_markdown_v2(button_pressed) if button_pressed else 'N/A'
-    escaped_event_details = escape_markdown_v2(event_details) if event_details else 'N/A'
+    # Apply escape_html to all dynamic variables
+    escaped_event_type = escape_html(event_type)
+    escaped_first_name = escape_html(first_name)
+    escaped_username = escape_html(username) if username and username != 'N/A' else 'N/A'
+    escaped_chat_type = escape_html(chat_type)
+    escaped_button_pressed = escape_html(button_pressed) if button_pressed else 'N/A'
+    escaped_event_details = escape_html(event_details) if event_details else 'N/A'
 
-    # The user_id, chat_id, and message_time are wrapped in backticks,
-    # so their *values* need to be escaped *before* being placed in the f-string.
-    # The `escape_markdown_v2` function now handles non-string inputs by converting them.
-    escaped_user_id = escape_markdown_v2(user_id)
-    escaped_chat_id = escape_markdown_v2(chat_id)
-    escaped_message_time = escape_markdown_v2(message_time)
+    # The `escape_html` function handles non-string inputs by converting them.
+    escaped_user_id = escape_html(user_id)
+    escaped_chat_id = escape_html(chat_id)
+    escaped_message_time = escape_html(message_time)
 
     notification_message = (
         f"New User Interaction!\n\n"
-        f"Event Type: *{escaped_event_type}*\n"
-        f"User ID: `{escaped_user_id}`\n" # Use escaped value
-        f"First Name: *{escaped_first_name}*\n"
-        f"Username: `@{escaped_username}`" if escaped_username != 'N/A' else f"Username: `N/A`\n"
-        f"Chat ID: `{escaped_chat_id}`\n" # Use escaped value
-        f"Chat Type: *{escaped_chat_type}*\n"
-        f"Time: `{escaped_message_time}`\n" # Use escaped value
+        f"Event Type: <b>{escaped_event_type}</b>\n"
+        f"User ID: <code>{escaped_user_id}</code>\n" # Use escaped value
+        f"First Name: <b>{escaped_first_name}</b>\n"
+        f"Username: <code>@{escaped_username}</code>" if escaped_username != 'N/A' else f"Username: <code>N/A</code>\n"
+        f"Chat ID: <code>{escaped_chat_id}</code>\n" # Use escaped value
+        f"Chat Type: <b>{escaped_chat_type}</b>\n"
+        f"Time: <code>{escaped_message_time}</code>\n" # Use escaped value
     )
     if button_pressed and button_pressed != 'N/A':
-        notification_message += f"Button Pressed: *{escaped_button_pressed}*\n"
+        notification_message += f"Button Pressed: <b>{escaped_button_pressed}</b>\n"
     if event_details and event_details != 'N/A':
         # Truncate details if too long for notification, e.g., first 200 chars
         truncated_details = escaped_event_details[:200] + "..." if len(escaped_event_details) > 200 else escaped_event_details
-        notification_message += f"Details: `{truncated_details}`\n"
+        notification_message += f"Details: <code>{truncated_details}</code>\n"
     
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=notification_message,
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.HTML
         )
         last_admin_notification_time[user_id] = current_time # Update last sent time
         logger.info(f"Admin notification sent for user {user_id} (event: {event_type}).")
@@ -305,10 +293,10 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Loading animation setup for Gemini response
         loading_emojis = ["...", ". . .", "...."] # No emojis, just dots
-        loading_message_text = escape_markdown_v2("Gemini is thinking")
+        loading_message_text = escape_html("Gemini is thinking")
         processing_message = await update.message.reply_text(
             loading_message_text + loading_emojis[0],
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.HTML
         )
 
         animation_running = True
@@ -318,7 +306,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 try:
                     await processing_message.edit_text(
                         loading_message_text + loading_emojis[index % len(loading_emojis)],
-                        parse_mode=ParseMode.MARKDOWN_V2
+                        parse_mode=ParseMode.HTML
                     )
                     index += 1
                     await asyncio.sleep(1) # Slower animation for AI thinking
@@ -333,15 +321,15 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             response = await asyncio.to_thread(gemini_conversations[user_id].send_message, user_message)
             gemini_text_response = response.text
             
-            # Escape Gemini's response for MarkdownV2
-            escaped_gemini_response = escape_markdown_v2(gemini_text_response)
+            # Escape Gemini's response for HTML
+            escaped_gemini_response = escape_html(gemini_text_response)
 
             animation_running = False # Stop animation
             await animation_task # Ensure the animation task finishes
             
             await processing_message.edit_text(
                 escaped_gemini_response,
-                parse_mode=ParseMode.MARKDOWN_V2
+                parse_mode=ParseMode.HTML
             )
             logger.info(f"Gemini replied to user {user_id}: {gemini_text_response[:50]}...") # Log first 50 chars
         except genai.types.BlockedPromptException as e:
@@ -349,16 +337,16 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             animation_running = False
             if not animation_task.done(): animation_task.cancel(); await animation_task
             await processing_message.edit_text(
-                escape_markdown_v2("I'm sorry, I cannot respond to that query. It might violate content policies. Please try asking something else."),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html("I'm sorry, I cannot respond to that query. It might violate content policies. Please try asking something else."),
+                parse_mode=ParseMode.HTML
             )
         except genai.types.StopCandidateException as e:
             logger.warning(f"Gemini response stopped mid-generation for user {user_id}: {e}")
             animation_running = False
             if not animation_task.done(): animation_task.cancel(); await animation_task
             await processing_message.edit_text(
-                escape_markdown_v2("Gemini stopped generating a response. Please try rephrasing your question."),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html("Gemini stopped generating a response. Please try rephrasing your question."),
+                parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.error(f"Error during Gemini chat for user {user_id}: {e}", exc_info=True)
@@ -369,8 +357,8 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_markdown_v2("I'm sorry, I couldn't process your request with Gemini right now. Please try again later."),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html("I'm sorry, I couldn't process your request with Gemini right now. Please try again later."),
+                parse_mode=ParseMode.HTML
             )
         return # Consume the message if it's a Gemini chat interaction
 
@@ -390,8 +378,8 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # If it's not a URL for download or a Gemini chat, it's just a regular message.
     # Provide a default "I didn't understand" message with the main keyboard.
     await update.message.reply_text(
-        escape_markdown_v2("I didn't understand that. Please use the buttons below to interact with me, or send a valid URL after selecting a download option."),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        escape_html("I didn't understand that. Please use the buttons below to interact with me, or send a valid URL after selecting a download option."),
+        parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardMarkup(
             [[KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")], [KeyboardButton("Help")]],
             one_time_keyboard=False,
@@ -438,9 +426,9 @@ async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DE
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_markdown_v2("Hello! I'm Gemini. I'm ready to chat with you.\n\n"
+        escape_html("Hello! I'm Gemini. I'm ready to chat with you.\n\n"
                            "What's on your mind today? Ask me anything!"),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
 
@@ -465,8 +453,8 @@ async def handle_exit_gemini_button(update: Update, context: ContextTypes.DEFAUL
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_markdown_v2("You've exited Gemini chat. How can I help you further?"),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        escape_html("You've exited Gemini chat. How can I help you further?"),
+        parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
 
@@ -478,8 +466,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     if not update.message.reply_to_message:
         await update.message.reply_text(
-            escape_markdown_v2("Please reply to a message with `/tag` to use this command."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html("Please reply to a message with <code>/tag</code> to use this command."),
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -489,8 +477,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not replied_message_text:
         await update.message.reply_text(
-            escape_markdown_v2("The replied message does not contain any text or caption to resend."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html("The replied message does not contain any text or caption to resend."),
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -499,8 +487,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await save_user_to_db(update, context, event_details=update.message.text)
 
     feedback_message = await update.message.reply_text(
-        escape_markdown_v2("Fetching user list and preparing mentions, please wait..."),
-        parse_mode=ParseMode.MARKDOWN_V2
+        escape_html("Fetching user list and preparing mentions, please wait..."),
+        parse_mode=ParseMode.HTML
     )
 
     session = Session()
@@ -510,7 +498,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"DB: Found {len(all_known_users_in_chat)} known users for chat {chat_id}.")
     except Exception as e:
         logger.error(f"DB: Error querying users for chat {chat_id}: {e}")
-        await feedback_message.edit_text(escape_markdown_v2("An error occurred while fetching known users from the database. Please try again later."))
+        await feedback_message.edit_text(escape_html("An error occurred while fetching known users from the database. Please try again later."))
         return
     finally:
         session.close()
@@ -531,24 +519,24 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_obj in all_known_users_in_chat:
         if user_obj.user_id not in current_chat_administrators_ids:
             mention_name = user_obj.first_name if user_obj.first_name else "A User"
-            escaped_mention_name = escape_markdown_v2(mention_name)
-            members_to_tag_links.append(f"[{escaped_mention_name}](tg://user?id={user_obj.user_id})")
+            escaped_mention_name = escape_html(mention_name)
+            members_to_tag_links.append(f"<a href='tg://user?id={user_obj.user_id}'>{escaped_mention_name}</a>")
 
     if not members_to_tag_links:
         await feedback_message.edit_text(
-            escape_markdown_v2("No known non-admin members to tag in this group. Users must send a message first to be added to the tag list, and ensure bot privacy is off."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html("No known non-admin members to tag in this group. Users must send a message first to be added to the tag list, and ensure bot privacy is off."),
+            parse_mode=ParseMode.HTML
         )
         return
 
     logger.info(f"Prepared {len(members_to_tag_links)} members for tagging in chat {chat_id}.")
 
     # --- Prepare the message content ---
-    final_replied_message_content = escape_markdown_v2(replied_message_text)
+    final_replied_message_content = escape_html(replied_message_text)
     
     initial_command_text = ""
     if update.message.text and ' ' in update.message.text:
-        initial_command_text = escape_markdown_v2(update.message.text.split(' ', 1)[1])
+        initial_command_text = escape_html(update.message.text.split(' ', 1)[1])
     
     full_message_content_start = ""
     if initial_command_text:
@@ -560,20 +548,21 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     messages_to_send = []
     current_mentions_group = []
     
-    # Use len() on the encoded string to approximate byte length for Telegram's character limit
-    current_message_base_length_bytes = len(full_message_content_start.encode('utf-8')) + len("\n ".encode('utf-8'))
+    # Calculate length in characters (approximate, HTML tags add to length but aren't displayed)
+    # Telegram's character limit is 4096. We'll use a conservative estimate.
+    current_message_base_length = len(full_message_content_start) + len("\n ")
     
     for mention_link in members_to_tag_links:
-        mention_length_bytes = len(mention_link.encode('utf-8'))
+        mention_length = len(mention_link) # HTML tags add to this
         
-        if (current_message_base_length_bytes + sum(len(m.encode('utf-8')) + 1 for m in current_mentions_group) + mention_length_bytes > MAX_MESSAGE_LENGTH or
+        if (current_message_base_length + sum(len(m) + 1 for m in current_mentions_group) + mention_length > MAX_MESSAGE_LENGTH or
             len(current_mentions_group) >= MAX_MENTIONS_PER_MESSAGE):
             
             messages_to_send.append(full_message_content_start + " " + " ".join(current_mentions_group)) 
             
             current_mentions_group = []
             full_message_content_start = "" 
-            current_message_base_length_bytes = len(" ".encode('utf-8')) 
+            current_message_base_length = len(" ".encode('utf-8')) 
 
         current_mentions_group.append(mention_link)
 
@@ -586,7 +575,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
              messages_to_send.append(" " + " ".join(current_mentions_group))
 
 
-    await feedback_message.edit_text(escape_markdown_v2(f"Sending {len(messages_to_send)} messages with mentions..."))
+    await feedback_message.edit_text(escape_html(f"Sending {len(messages_to_send)} messages with mentions..."))
 
     successful_sends = 0
     for i, message_text in enumerate(messages_to_send):
@@ -594,7 +583,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=message_text,
-                parse_mode=ParseMode.MARKDOWN_V2,
+                parse_mode=ParseMode.HTML,
                 disable_notification=(i > 0 and len(messages_to_send) > 1) 
             )
             successful_sends += 1
@@ -604,13 +593,13 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if successful_sends == len(messages_to_send):
         await feedback_message.edit_text(
-            escape_markdown_v2(f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html(f"Successfully sent {successful_sends} messages with mentions for {len(members_to_tag_links)} members."),
+            parse_mode=ParseMode.HTML
         )
     else:
         await feedback_message.edit_text(
-            escape_markdown_v2(f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html(f"Completed sending messages. Sent {successful_sends} out of {len(messages_to_send)} parts. Some errors occurred while sending mentions. Check logs for details and ensure bot privacy is off."),
+            parse_mode=ParseMode.HTML
         )
 
 
@@ -627,10 +616,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
         await update.message.reply_text(
-            escape_markdown_v2("Hi there! I'm your multimedia download and group tagging bot.\n\n"
+            escape_html("Hi there! I'm your multimedia download and group tagging bot.\n\n"
             "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info. "
             "You can also chat with Gemini for anything else you need!"), # Updated welcome message
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
 
@@ -651,7 +640,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
-    message_text = escape_markdown_v2("How to use the Bot:\n\n"
+    message_text = escape_html("How to use the Bot:\n\n"
         "To Download Videos and Audio:\n"
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
@@ -662,14 +651,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- To exit the conversation, tap the 'Exit Gemini Chat' button.\n\n"
         "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
-        "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> *Turn off*.\n"
+        "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> <b>Turn off</b>.\n"
         "   Why? This allows me to see all messages in the group and build a list of members to tag.\n"
-        "3. Wait for members to send messages. I can only tag users who have sent a message in the group *after* I've joined and my Group Privacy is off.\n"
-        "4. To tag everyone: Reply to any message in the group with the command `/tag`.\n"
+        "3. Wait for members to send messages. I can only tag users who have sent a message in the group <b>after</b> I've joined and my Group Privacy is off.\n"
+        "4. To tag everyone: Reply to any message in the group with the command <code>/tag</code>.\n"
         "I will resend the replied message and mention all known non-admin members. "
         "Mentions will show their first name, not their username, ensuring privacy while still notifying them.\n\n"
         "Limitations:\n"
-        "- Download functionality relies on `yt-dlp` and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit.\n"
+        "- Download functionality relies on <code>yt-dlp</code> and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit.\n"
         "- Some content might require a logged-in session or be geo-restricted.\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
         "- Very large groups might experience delays or split messages due to Telegram's limits.")
@@ -678,13 +667,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
             message_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
             message_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup # Apply ReplyKeyboardMarkup here too
         )
 
@@ -721,14 +710,14 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
         # It's an inline button press, edit the existing message
         await update.callback_query.answer() # Acknowledge the inline button press
         await update.callback_query.edit_message_text(
-            escape_markdown_v2("Please choose a platform to download from:"),
-            parse_mode=ParseMode.MARKDOWN_V2,
+            escape_html("Please choose a platform to download from:"),
+            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
     else: # It's a regular message (from the ReplyKeyboardMarkup button)
         await update.message.reply_text(
-            escape_markdown_v2("Please choose a platform to download from:"),
-            parse_mode=ParseMode.MARKDOWN_V2,
+            escape_html("Please choose a platform to download from:"),
+            parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
 
@@ -751,8 +740,8 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
     context.user_data['platform'] = platform_name
 
     await query.edit_message_text(
-        escape_markdown_v2(f"Please send me the full URL for the {platform_name} content."),
-        parse_mode=ParseMode.MARKDOWN_V2
+        escape_html(f"Please send me the full URL for the {platform_name} content."),
+        parse_mode=ParseMode.HTML
     )
 
 
@@ -799,8 +788,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     
     if not is_valid_url:
         await update.message.reply_text(
-            escape_markdown_v2(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html(f"That doesn't look like a valid {platform} URL. Please provide a full URL."),
+            parse_mode=ParseMode.HTML
         )
         return
 
@@ -810,10 +799,10 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     
     # Loading animation setup
     loading_emojis = ["...", ". . .", "...."]
-    loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait")
+    loading_message_text = escape_html(f"Getting your {platform} content, please wait")
     processing_message = await update.message.reply_text(
         loading_message_text + loading_emojis[0],
-        parse_mode=ParseMode.MARKDOWN_V2
+        parse_mode=ParseMode.HTML
     )
 
     # Flag to control the animation loop
@@ -824,7 +813,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             try:
                 await processing_message.edit_text(
                     loading_message_text + loading_emojis[index % len(loading_emojis)],
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    parse_mode=ParseMode.HTML
                 )
                 index += 1
                 await asyncio.sleep(0.5) # Update every half second
@@ -879,8 +868,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                     except asyncio.CancelledError: pass
 
                 await processing_message.edit_text(
-                    escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    escape_html("Sorry, I cannot download live streams. Please provide a link to a completed video."),
+                    parse_mode=ParseMode.HTML
                 )
                 return
             
@@ -927,7 +916,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         logger.info(f"Downloaded file size: {file_size / (1024*1024):.2f} MB")
 
         # Get content title for caption
-        content_title = escape_markdown_v2(info_dict.get('title', f'{platform} Content'))
+        content_title = escape_html(info_dict.get('title', f'{platform} Content'))
         
         # Decide whether to send as video/audio or document based on platform and size
         if platform_key == "soundcloud": # Always send audio as document
@@ -938,15 +927,15 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
+                parse_mode=ParseMode.HTML
             )
             with open(downloaded_file_path, 'rb') as audio_file:
                 await context.bot.send_document(
                     chat_id=update.message.chat_id,
                     document=InputFile(audio_file, filename=os.path.basename(downloaded_file_path)),
                     caption=f"Here's your {platform} audio: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
+                    parse_mode=ParseMode.HTML,
                     read_timeout=300,
                     write_timeout=300,
                     connect_timeout=300
@@ -960,15 +949,15 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
+                parse_mode=ParseMode.HTML
             )
             with open(downloaded_file_path, 'rb') as video_file:
                 await context.bot.send_document(
                     chat_id=update.message.chat_id,
                     document=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
                     caption=f"Here's your {platform} video: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
+                    parse_mode=ParseMode.HTML,
                     read_timeout=300, # Increased timeout for large uploads
                     write_timeout=300, # Increased timeout for large uploads
                     connect_timeout=300
@@ -982,15 +971,15 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
-                parse_mode=ParseMode.MARKDOWN_V2
+                escape_html(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
+                parse_mode=ParseMode.HTML
             )
             with open(downloaded_file_path, 'rb') as video_file:
                 await context.bot.send_video(
                     chat_id=update.message.chat_id,
                     video=InputFile(video_file, filename=os.path.basename(downloaded_file_path)), # Use actual filename
                     caption=f"Here's your {platform} video: {content_title}",
-                    parse_mode=ParseMode.MARKDOWN_V2,
+                    parse_mode=ParseMode.HTML,
                     supports_streaming=True, # Allows streaming before full download
                     read_timeout=300, 
                     write_timeout=300,
@@ -999,8 +988,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
 
         await processing_message.delete() # Remove the "processing" message
         await update.message.reply_text(
-            escape_markdown_v2(f"Your {platform} content has been sent successfully! Enjoy!"),
-            parse_mode=ParseMode.MARKDOWN_V2
+            escape_html(f"Your {platform} content has been sent successfully! Enjoy!"),
+            parse_mode=ParseMode.HTML
         )
 
     except yt_dlp.utils.DownloadError as e:
@@ -1030,9 +1019,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             except asyncio.CancelledError: pass
 
         await processing_message.edit_text(
-            escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
+            escape_html(f"Failed to download the {platform} content: <code>{escape_html(user_facing_error)}</code>\n\n"
                                "Please ensure the link is public and valid. Try again later."),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.HTML
         )
     except FileNotFoundError as e:
         logger.error(f"File system error during {platform} download for {content_url}: {e}")
@@ -1043,9 +1032,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             except asyncio.CancelledError: pass
 
         await processing_message.edit_text(
-            escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
+            escape_html(f"A file error occurred: <code>{escape_html(str(e))}</code>\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.HTML
         )
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
@@ -1056,9 +1045,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             except asyncio.CancelledError: pass
 
         await processing_message.edit_text(
-            escape_markdown_v2(f"An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
+            escape_html(f"An unexpected error occurred while processing your request: <code>{escape_html(str(e))}</code>\n\n"
                                "Please try again later. If the issue persists, contact support. "),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.HTML
         )
     finally:
         animation_running = False # Ensure animation stops even if not explicitly stopped in try/except
@@ -1090,7 +1079,7 @@ async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Ensure user is saved and notification sent even if command is incomplete
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1100,7 +1089,7 @@ async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1110,7 +1099,7 @@ async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def pinterest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1120,7 +1109,7 @@ async def pinterest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1130,7 +1119,7 @@ async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1140,7 +1129,7 @@ async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1150,7 +1139,7 @@ async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
-            escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
+            escape_html("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 
