@@ -58,7 +58,7 @@ TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
 ADMIN_ID = 7302005705 # Your specified admin ID
 
 # 2. Admin Notification Throttling
-ADMIN_NOTIFICATION_COOLDOWN = 300 # seconds (5 minutes)
+ADMIN_NOTIFICATION_COOLDEN = 300 # seconds (5 minutes)
 last_admin_notification_time = {} # Dictionary to store last notification time per user
 
 if not BOT_TOKEN:
@@ -130,7 +130,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Check cooldown before sending notification
     current_time = time.time()
     if user_id in last_admin_notification_time and \
-       (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDOWN:
+       (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDEN:
         logger.info(f"Admin notification for user {user_id} throttled. Last sent {current_time - last_admin_notification_time[user_id]:.2f}s ago.")
         return
 
@@ -151,7 +151,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     escaped_event_details = escape_markdown_v2(event_details) if event_details else 'N/A'
 
     notification_message = (
-        f"🔔 New User Interaction\\! 🔔\n\n"
+        f"New User Interaction!\n\n"
         f"Event Type: *{escaped_event_type}*\n"
         f"User ID: `{user_id}`\n"
         f"First Name: *{escaped_first_name}*\n"
@@ -274,8 +274,8 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.warning(f"Gemini conversation not found for user {user_id} in GEMINI_STATE, initializing new one.")
 
         # Loading animation setup for Gemini response
-        loading_emojis = ["💭", "🤔", "💡", "✨"] # Different emojis for Gemini
-        loading_message_text = escape_markdown_v2("✨ Gemini is thinking...")
+        loading_emojis = ["...", ". . .", "...."] # No emojis, just dots
+        loading_message_text = escape_markdown_v2("Gemini is thinking")
         processing_message = await update.message.reply_text(
             loading_message_text + loading_emojis[0],
             parse_mode=ParseMode.MARKDOWN_V2
@@ -314,6 +314,22 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             logger.info(f"Gemini replied to user {user_id}: {gemini_text_response[:50]}...") # Log first 50 chars
+        except genai.types.BlockedPromptException as e:
+            logger.warning(f"Gemini prompt blocked for user {user_id}: {e.response.prompt_feedback}")
+            animation_running = False
+            if not animation_task.done(): animation_task.cancel(); await animation_task
+            await processing_message.edit_text(
+                escape_markdown_v2("I'm sorry, I cannot respond to that query. It might violate content policies. Please try asking something else."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        except genai.types.StopCandidateException as e:
+            logger.warning(f"Gemini response stopped mid-generation for user {user_id}: {e}")
+            animation_running = False
+            if not animation_task.done(): animation_task.cancel(); await animation_task
+            await processing_message.edit_text(
+                escape_markdown_v2("Gemini stopped generating a response. Please try rephrasing your question."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
         except Exception as e:
             logger.error(f"Error during Gemini chat for user {user_id}: {e}", exc_info=True)
             animation_running = False # Stop animation
@@ -323,7 +339,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 except asyncio.CancelledError: pass
 
             await processing_message.edit_text(
-                escape_markdown_v2("I'm sorry, I couldn't process your request with ✨ Gemini right now. Please try again later."),
+                escape_markdown_v2("I'm sorry, I couldn't process your request with Gemini right now. Please try again later."),
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         return # Consume the message if it's a Gemini chat interaction
@@ -347,7 +363,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         escape_markdown_v2("I didn't understand that. Please use the buttons below to interact with me, or send a valid URL after selecting a download option."),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=ReplyKeyboardMarkup(
-            [[KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")], [KeyboardButton("Help")]],
+            [[KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")], [KeyboardButton("Help")]],
             one_time_keyboard=False,
             resize_keyboard=True
         )
@@ -371,9 +387,9 @@ async def handle_keyboard_help_button(update: Update, context: ContextTypes.DEFA
     await help_command(update, context)
 
 async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the '✨ Gemini' keyboard button press."""
+    """Handles the 'Gemini' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context, button_pressed="✨ Gemini")
+        await save_user_to_db(update, context, button_pressed="Gemini")
 
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
@@ -389,20 +405,20 @@ async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DE
         logger.info(f"Resuming Gemini conversation for user {user_id}")
     
     # Provide options to exit Gemini chat
-    keyboard = [[KeyboardButton("⬅️ Exit Gemini Chat")]]
+    keyboard = [[KeyboardButton("Exit Gemini Chat")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_markdown_v2("Hello! I'm ✨ Gemini. I'm ready to chat with you.\n\n"
+        escape_markdown_v2("Hello! I'm Gemini. I'm ready to chat with you.\n\n"
                            "What's on your mind today? Ask me anything!"),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=reply_markup
     )
 
 async def handle_exit_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the '⬅️ Exit Gemini Chat' keyboard button press."""
+    """Handles the 'Exit Gemini Chat' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context, button_pressed="⬅️ Exit Gemini Chat")
+        await save_user_to_db(update, context, button_pressed="Exit Gemini Chat")
 
     user_id = update.message.from_user.id
     context.user_data['state'] = None # Clear state
@@ -414,13 +430,13 @@ async def handle_exit_gemini_button(update: Update, context: ContextTypes.DEFAUL
 
     # Restore main keyboard
     keyboard = [
-        [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")],
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
     await update.message.reply_text(
-        escape_markdown_v2("You've exited ✨ Gemini chat. How can I help you further?"),
+        escape_markdown_v2("You've exited Gemini chat. How can I help you further?"),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=reply_markup
     )
@@ -576,15 +592,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Regular Keyboard (persistent, appears above message input)
         keyboard = [
-            [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")], # Added Gemini button
+            [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")], # Added Gemini button
             [KeyboardButton("Help")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
         await update.message.reply_text(
-            escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
-            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info\\. "
-            "You can also chat with ✨ Gemini for anything else you need\\!"), # Updated welcome message
+            escape_markdown_v2("Hi there! I'm your multimedia download and group tagging bot.\n\n"
+            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info. "
+            "You can also chat with Gemini for anything else you need!"), # Updated welcome message
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
@@ -597,7 +613,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
-        [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")],
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Gemini")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
@@ -608,10 +624,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
         "- Send the full video/audio URL when prompted.\n\n"
-        "To Chat with ✨ Gemini (AI):\n"
-        "- Tap the '✨ Gemini' button on your keyboard.\n"
+        "To Chat with Gemini (AI):\n"
+        "- Tap the 'Gemini' button on your keyboard.\n"
         "- Ask me anything you want! I'll try my best to answer.\n"
-        "- To exit the conversation, tap the '⬅️ Exit Gemini Chat' button.\n\n"
+        "- To exit the conversation, tap the 'Exit Gemini Chat' button.\n\n"
         "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
         "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> *Turn off*.\n"
@@ -739,7 +755,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be", "m.youtube.com", "youtube.com", "youtu.be"], # More comprehensive YouTube domains
+        "youtube": ["youtube.com", "youtu.be"], # More comprehensive YouTube domains
         "soundcloud": "soundcloud.com"
     }
     
@@ -772,8 +788,8 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     os.makedirs(temp_dir_name, exist_ok=True)
     
     # Loading animation setup
-    loading_emojis = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
-    loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait... ")
+    loading_emojis = ["...", ". . .", "...."]
+    loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait")
     processing_message = await update.message.reply_text(
         loading_message_text + loading_emojis[0],
         parse_mode=ParseMode.MARKDOWN_V2
@@ -1141,8 +1157,8 @@ def main() -> None:
     # Use filters.Regex to match the exact button text.
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^✨ Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^⬅️ Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
 
     # 2. Callback Query Handlers for inline buttons
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
