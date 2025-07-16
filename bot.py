@@ -10,7 +10,7 @@ import time # Import for time-based notification throttling
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, String, UniqueConstraint
+from sqlalchemy import create_engine, Column, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.types import BigInteger
@@ -19,13 +19,47 @@ import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 # --- Gemini API Integration ---
 import google.generativeai as genai
 
-# Your Gemini API Key (as provided)
-GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM"
+# --- Configuration ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-if not GEMINI_API_KEY:
-    logger.critical("GEMINI_API_KEY not set. Exiting.")
+# Load sensitive information from environment variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+ADMIN_ID_STR = os.environ.get("ADMIN_ID") # Get ADMIN_ID as string first
+
+# Validate essential environment variables
+if not BOT_TOKEN:
+    logger.critical("BOT_TOKEN environment variable not set. Exiting.")
     sys.exit(1)
 
+if not DATABASE_URL:
+    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    sys.exit(1)
+
+if not GEMINI_API_KEY:
+    logger.critical("GEMINI_API_KEY not set in environment variables. Exiting.")
+    sys.exit(1)
+
+ADMIN_ID = None
+if ADMIN_ID_STR:
+    try:
+        ADMIN_ID = int(ADMIN_ID_STR)
+        logger.info(f"Admin ID loaded: {ADMIN_ID}")
+    except ValueError:
+        logger.error(f"Invalid ADMIN_ID format in environment variables: '{ADMIN_ID_STR}'. Must be an integer.")
+else:
+    logger.warning("ADMIN_ID environment variable not set. Admin notifications will be disabled.")
+
+
+# Adjust DATABASE_URL for SQLAlchemy 2.0 compatibility with Heroku Postgres
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
 # For text-only generation, use the 'gemini-pro' model
 GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
@@ -33,17 +67,6 @@ GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
 # Dictionary to store ongoing Gemini conversations (for stateful chat)
 # {user_id: conversation_object}
 gemini_conversations = {}
-
-# --- Configuration ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# 1. Hardcoded Bot Token
-BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y"
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Define a temporary directory for downloads
 # On Heroku, this will be in the ephemeral filesystem
@@ -54,23 +77,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True) # Create if it doesn't exist
 TELEGRAM_VIDEO_LIMIT_MB = 50
 TELEGRAM_VIDEO_LIMIT_BYTES = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
 
-# --- Admin ID for notifications ---
-ADMIN_ID = 7302005705 # Your specified admin ID
-
-# 2. Admin Notification Throttling
-ADMIN_NOTIFICATION_COOLDEN = 300 # seconds (5 minutes)
+# Admin Notification Throttling
+ADMIN_NOTIFICATION_COOLDOWN = 300 # seconds (5 minutes)
 last_admin_notification_time = {} # Dictionary to store last notification time per user
-
-if not BOT_TOKEN:
-    logger.critical("BOT_TOKEN environment variable not set. Exiting.")
-    sys.exit(1)
-
-if not DATABASE_URL:
-    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
-    sys.exit(1)
-
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # --- Database Setup ---
 Base = declarative_base()
@@ -81,7 +90,8 @@ class User(Base):
     user_id = Column(BigInteger, primary_key=True, nullable=False)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    chat_id = Column(BigInteger, primary_key=True, nullable=False)
+    chat_id = Column(BigInteger, primary_key=True, nullable=False) # chat_id as part of composite key
+    __table_args__ = (UniqueConstraint('user_id', 'chat_id', name='_user_chat_uc'),) # Ensures unique user per chat
 
     def __repr__(self):
         return (f"<User(id={self.user_id}, first_name='{self.first_name}', "
@@ -125,12 +135,15 @@ def escape_markdown_v2(text: str) -> str:
 
 async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str, button_pressed: str = None, event_details: str = None) -> None:
     """Sends a notification message to the admin, with optional button and details."""
+    if ADMIN_ID is None: # Do not send if ADMIN_ID is not set
+        return
+        
     user_id = user_info.get('user_id', 'N/A')
     
     # Check cooldown before sending notification
     current_time = time.time()
     if user_id in last_admin_notification_time and \
-       (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDEN:
+       (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDOWN:
         logger.info(f"Admin notification for user {user_id} throttled. Last sent {current_time - last_admin_notification_time[user_id]:.2f}s ago.")
         return
 
@@ -145,7 +158,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # Apply escape_markdown_v2 to all variables that go into the message
     escaped_event_type = escape_markdown_v2(event_type)
     escaped_first_name = escape_markdown_v2(first_name)
-    escaped_username = escape_markdown_v2(username) if username != 'N/A' else 'N/A'
+    escaped_username = escape_markdown_v2(username) if username and username != 'N/A' else 'N/A'
     escaped_chat_type = escape_markdown_v2(chat_type)
     escaped_button_pressed = escape_markdown_v2(button_pressed) if button_pressed else 'N/A'
     escaped_event_details = escape_markdown_v2(event_details) if event_details else 'N/A'
@@ -182,13 +195,22 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, button_pressed: str = None, event_details: str = None) -> None:
     """Saves or updates user information in the database and sends admin notification."""
     # This function expects update.message to be present
-    if not update.message or not update.message.from_user:
-        logger.warning("save_user_to_db called without a valid message or user object.")
+    # If called from a CallbackQuery, ensure a dummy message is created for from_user, chat_id, chat_type
+    if update.message:
+        user = update.message.from_user
+        chat_id = update.message.chat_id
+        chat_type = update.message.chat.type
+    elif update.callback_query:
+        user = update.callback_query.from_user
+        chat_id = update.callback_query.message.chat_id
+        chat_type = update.callback_query.message.chat.type
+    else:
+        logger.warning("save_user_to_db called without a valid message or callback_query object.")
         return
 
-    user = update.message.from_user
-    chat_id = update.message.chat_id
-    chat_type = update.message.chat.type
+    if not user:
+        logger.warning("save_user_to_db called without a valid user object.")
+        return
 
     if chat_type not in ["group", "supergroup", "private"]:
         return
@@ -392,7 +414,6 @@ async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DE
         await save_user_to_db(update, context, button_pressed="Gemini")
 
     user_id = update.message.from_user.id
-    chat_id = update.message.chat_id
 
     # Set user state to Gemini chat
     context.user_data['state'] = GEMINI_STATE
@@ -608,8 +629,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
     # Ensure user is saved and notification sent if this is a direct /help command
-    if update.message and update.message.from_user:
+    # This function is now also called by a keyboard button, so update.message might not be present if from callback
+    if update.message:
         await save_user_to_db(update, context, button_pressed="Help (Command)")
+    elif update.callback_query: # For inline button, ensure proper context for save_user_to_db
+         await save_user_to_db(update, context, button_pressed="Help (Inline Button)")
+
 
     # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
@@ -618,8 +643,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
-    await update.message.reply_text(
-        escape_markdown_v2("How to use the Bot:\n\n"
+    message_text = escape_markdown_v2("How to use the Bot:\n\n"
         "To Download Videos and Audio:\n"
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
@@ -640,10 +664,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Download functionality relies on `yt-dlp` and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit.\n"
         "- Some content might require a logged-in session or be geo-restricted.\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
-        "- Very large groups might experience delays or split messages due to Telegram's limits."),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=reply_markup # Apply ReplyKeyboardMarkup here too
-    )
+        "- Very large groups might experience delays or split messages due to Telegram's limits.")
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            message_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            message_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup # Apply ReplyKeyboardMarkup here too
+        )
 
 async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Determine if the update came from a CallbackQuery or a regular Message
@@ -653,23 +688,9 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
         logger.warning("show_download_options called without a valid message or user object.")
         return
 
-    # Extract info from the appropriate source (query.message or update.message)
-    from_user = message_source.from_user
-    chat_id = message_source.chat_id if hasattr(message_source, 'chat_id') else message_source.chat.id
-    chat_type = message_source.chat.type
-
-    # Save user on interaction point
-    class DummyMessage:
-        def __init__(self, from_user, chat_id, chat_type):
-            self.from_user = from_user
-            self.chat_id = chat_id
-            self.chat = type('Chat', (object,), {'type': chat_type})() # Mock chat object
-    
-    dummy_message = DummyMessage(from_user, chat_id, chat_type)
-    dummy_update = Update(update_id=0, message=dummy_message)
-    # Pass 'Download Videos/Audio (Inline)' if from inline, else just 'Download Videos/Audio'
-    button_label = "Download Videos/Audio (Inline)" if update.callback_query else "Download Videos/Audio"
-    await save_user_to_db(dummy_update, context, button_pressed=button_label)
+    # Save user on interaction point using the unified save_user_to_db
+    button_label = "Download Videos/Audio (Inline)" if update.callback_query else "Download Videos/Audio (Keyboard)"
+    await save_user_to_db(update, context, button_pressed=button_label)
 
     keyboard = [
         [
@@ -710,17 +731,9 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
     
     # Save user on callback query as well
     if query.message and query.from_user:
-        class DummyMessage:
-            def __init__(self, from_user, chat_id, chat_type):
-                self.from_user = from_user
-                self.chat_id = chat_id
-                self.chat = type('Chat', (object,), {'type': chat_type})()
-        
-        dummy_message = DummyMessage(query.from_user, query.message.chat_id, query.message.chat.type)
-        dummy_update = type('Update', (object,), {'message': dummy_message})()
         # Parse the platform name from callback data for notification
         platform_name_for_notification = query.data.split(":")[1]
-        await save_user_to_db(dummy_update, context, button_pressed=f"Selected Platform: {platform_name_for_notification}")
+        await save_user_to_db(update, context, button_pressed=f"Selected Platform: {platform_name_for_notification}")
 
     # Parse the callback data: "download_platform:PLATFORM_NAME"
     platform_name = query.data.split(":")[1]
@@ -817,7 +830,6 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     downloaded_file_path = None
     try:
         ydl_opts = {
-            'outtmpl': os.path.join(temp_dir_name, '%(id)s.%(ext)s'),
             'noplaylist': True,
             'verbose': False, # Changed to False for cleaner logs in production
             'logger': logger,
@@ -831,7 +843,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         # Special handling for SoundCloud (audio only)
         if platform_key == "soundcloud":
             ydl_opts['format'] = 'bestaudio/best' # Prioritize audio
-            # Remove video postprocessor for audio only
+            # Remove video postprocessor for audio only, use audio specific one
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -865,10 +877,12 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
                 return
             
             # Use 'actual_ext' if available, otherwise 'ext'
-            file_extension = info_dict.get('actual_ext', info_dict.get('ext', 'mp4'))
-            # For audio, ensure it's mp3 or m4a if extracted
-            if platform_key == "soundcloud" and 'mp3' not in file_extension:
-                file_extension = 'mp3' # Force mp3 if yt-dlp might suggest something else
+            # Default to mp4 if not specified or for soundcloud, mp3
+            file_extension = info_dict.get('actual_ext', info_dict.get('ext'))
+            if platform_key == "soundcloud":
+                file_extension = 'mp3'
+            elif not file_extension: # Fallback if no extension
+                file_extension = 'mp4'
 
             # Some platforms might return a generic ID, use title if available for filename to be more descriptive
             suggested_filename_base = info_dict.get('title', info_dict.get('id', 'content'))
@@ -1140,39 +1154,4 @@ def main() -> None:
     # Command Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("tag", tag_all))
-    
-    # Register the command handlers for explicit /command <url> usage (if desired, currently prompts)
-    application.add_handler(CommandHandler("tiktok", tiktok_command))
-    application.add_handler(CommandHandler("fb", fb_command))
-    application.add_handler(CommandHandler("insta", insta_command))
-    application.add_handler(CommandHandler("pinterest", pinterest_command))
-    application.add_handler(CommandHandler("twitter", twitter_command))
-    application.add_handler(CommandHandler("youtube", youtube_command))
-    application.add_handler(CommandHandler("soundcloud", soundcloud_command))
-
-    # --- IMPORTANT: Order matters here! Specific handlers first. ---
-
-    # 1. Specific Message Handlers for Keyboard Buttons
-    # Use filters.Regex to match the exact button text.
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
-
-    # 2. Callback Query Handlers for inline buttons
-    application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
-    application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
-    application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$"))
-
-    # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
-    # This handler will also save user info and handle URLs when in 'awaiting_url' state.
-    # It now also handles Gemini conversations based on user state.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
-    
-    logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
-
+    application.add
