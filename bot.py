@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # I've hardcoded these back as per your explicit request.
 # WARNING: This is generally NOT recommended for production environments due to security risks.
 BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU" # Your Bot Token
-GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
+GEMINI_API_KEY = "AIzaSyDsvDW-lOhuGyQV5rL-uumbtlNamXqfWM" # Your Gemini API Key
 ADMIN_ID = 7302005705 # Your specified admin ID
 
 # DATABASE_URL is still loaded from environment variable as it's crucial for Heroku Postgres
@@ -600,7 +600,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             successful_sends += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
+            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(members_to_tag_links)} for chat {chat_id}: {e}")
 
     if successful_sends == len(messages_to_send):
         await feedback_message.edit_text(
@@ -1198,4 +1198,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
