@@ -7,14 +7,32 @@ import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
 
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton # Added ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
+from sqlalchemy.types import BigInteger
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
+
+# --- Gemini API Integration ---
+import google.generativeai as genai
+
+# Your Gemini API Key (as provided)
+GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM"
+
+if not GEMINI_API_KEY:
+    logger.critical("GEMINI_API_KEY not set. Exiting.")
+    sys.exit(1)
+
+genai.configure(api_key=GEMINI_API_KEY)
+# For text-only generation, use the 'gemini-pro' model
+GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
+
+# Dictionary to store ongoing Gemini conversations (for stateful chat)
+# {user_id: conversation_object}
+gemini_conversations = {}
 
 # --- Configuration ---
 logging.basicConfig(
@@ -23,7 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 1. Hardcoded Bot Token
-BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuqSuE4JrW0Y"
+BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuS4JrW0Y"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -85,6 +103,11 @@ Session = sessionmaker(bind=engine)
 MAX_MENTIONS_PER_MESSAGE = 50
 MAX_MESSAGE_LENGTH = 4096
 
+# --- User States for conversational flow ---
+GEMINI_STATE = 'gemini_chat'
+AWAITING_URL_STATE = 'awaiting_url'
+# Add other states as needed, e.g., 'normal' or None for default behavior
+
 # --- Helper Functions ---
 def escape_markdown_v2(text: str) -> str:
     """Escapes common MarkdownV2 special characters."""
@@ -100,8 +123,8 @@ def escape_markdown_v2(text: str) -> str:
         escaped_text = escaped_text.replace(char, f'\\{char}')
     return escaped_text
 
-async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str) -> None:
-    """Sends a notification message to the admin."""
+async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str, button_pressed: str = None, event_details: str = None) -> None:
+    """Sends a notification message to the admin, with optional button and details."""
     user_id = user_info.get('user_id', 'N/A')
     
     # Check cooldown before sending notification
@@ -120,12 +143,13 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     message_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Apply escape_markdown_v2 to all variables that go into the message
-    # before concatenating them.
     escaped_event_type = escape_markdown_v2(event_type)
     escaped_first_name = escape_markdown_v2(first_name)
     escaped_username = escape_markdown_v2(username) if username != 'N/A' else 'N/A'
     escaped_chat_type = escape_markdown_v2(chat_type)
-    
+    escaped_button_pressed = escape_markdown_v2(button_pressed) if button_pressed else 'N/A'
+    escaped_event_details = escape_markdown_v2(event_details) if event_details else 'N/A'
+
     notification_message = (
         f"🔔 New User Interaction\\! 🔔\n\n"
         f"Event Type: *{escaped_event_type}*\n"
@@ -134,8 +158,14 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
         f"Username: `@{escaped_username}`" if escaped_username != 'N/A' else f"Username: `N/A`\n"
         f"Chat ID: `{chat_id}`\n"
         f"Chat Type: *{escaped_chat_type}*\n"
-        f"Time: `{escape_markdown_v2(message_time)}`"
+        f"Time: `{escape_markdown_v2(message_time)}`\n"
     )
+    if button_pressed and button_pressed != 'N/A':
+        notification_message += f"Button Pressed: *{escaped_button_pressed}*\n"
+    if event_details and event_details != 'N/A':
+        # Truncate details if too long for notification, e.g., first 200 chars
+        truncated_details = escaped_event_details[:200] + "..." if len(escaped_event_details) > 200 else escaped_event_details
+        notification_message += f"Details: `{truncated_details}`\n"
     
     try:
         await context.bot.send_message(
@@ -149,7 +179,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
         logger.error(f"Failed to send admin notification for user {user_id}: {e}")
 
 
-async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, button_pressed: str = None, event_details: str = None) -> None:
     """Saves or updates user information in the database and sends admin notification."""
     # This function expects update.message to be present
     if not update.message or not update.message.from_user:
@@ -184,7 +214,7 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             session.add(new_user)
             session.commit()
             logger.info(f"DB: Added user {user.id} ({user.first_name}) for chat {chat_id}")
-            await send_notification_to_admin(context, user_info, "New User Added")
+            await send_notification_to_admin(context, user_info, "New User Added", button_pressed, event_details)
         else:
             # Check if any info changed to avoid unnecessary DB writes and notifications
             info_changed = False
@@ -198,22 +228,22 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if info_changed:
                 session.commit()
                 logger.info(f"DB: Updated user {user.id} ({user.first_name}) for chat {chat_id}")
-                await send_notification_to_admin(context, user_info, "User Info Updated")
+                await send_notification_to_admin(context, user_info, "User Info Updated", button_pressed, event_details)
             else:
                 logger.info(f"DB: User {user.id} ({user.first_name}) already exists and no info changed for chat {chat_id}. Not updating.")
                 # Send a general interaction notification even if user info didn't change
-                await send_notification_to_admin(context, user_info, "User Interacted")
+                await send_notification_to_admin(context, user_info, "User Interacted", button_pressed, event_details)
 
     except IntegrityError:
         session.rollback()
         logger.warning(f"DB: User {user.id} already exists (race condition) for chat {chat_id}. Rolling back.")
         # Still send notification if it's a known user interacting for the first time in this session
-        await send_notification_to_admin(context, user_info, "User Interacted (Race Condition)")
+        await send_notification_to_admin(context, user_info, "User Interacted (Race Condition)", button_pressed, event_details)
     except Exception as e:
         session.rollback()
         logger.error(f"DB: Error saving/updating user {user.id} for chat {chat_id}: {e}")
         user_info['error'] = str(e)
-        await send_notification_to_admin(context, user_info, f"Database Error: {e}")
+        await send_notification_to_admin(context, user_info, f"Database Error: {e}", button_pressed, event_details)
     finally:
         session.close()
 
@@ -221,50 +251,179 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handler for messages that are NOT commands, NOT specific keyboard button texts,
-    and are potentially URLs for download based on user state.
+    and are potentially URLs for download based on user state or Gemini chat.
     It also saves user info for general interactions.
     """
-    if update.message and update.message.from_user:
-        # Save user info for any message that passes through here
-        await save_user_to_db(update, context) 
+    if not update.message or not update.message.text:
+        return # Only process text messages here
+
+    # Save user info for any message that passes through here
+    # This will now include the actual message text as 'event_details' for better admin context
+    if update.message.from_user:
+        await save_user_to_db(update, context, event_details=update.message.text)
     
-    # Check if the user is in a state awaiting a URL
-    if update.message and update.message.text:
-        user_data = context.user_data
-        if user_data.get('state') == 'awaiting_url' and user_data.get('platform'):
-            platform_in_state = user_data['platform']
-            url = update.message.text
+    user_data = context.user_data
+    user_id = update.message.from_user.id
+    user_message = update.message.text
+
+    # Check if the user is in Gemini chat state
+    if user_data.get('state') == GEMINI_STATE:
+        if user_id not in gemini_conversations:
+            # This should ideally not happen if state is correctly managed, but good for robustness
+            gemini_conversations[user_id] = GEMINI_MODEL.start_chat(history=[])
+            logger.warning(f"Gemini conversation not found for user {user_id} in GEMINI_STATE, initializing new one.")
+
+        # Loading animation setup for Gemini response
+        loading_emojis = ["💭", "🤔", "💡", "✨"] # Different emojis for Gemini
+        loading_message_text = escape_markdown_v2("✨ Gemini is thinking...")
+        processing_message = await update.message.reply_text(
+            loading_message_text + loading_emojis[0],
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+        animation_running = True
+        async def animate_loading_gemini():
+            index = 0
+            while animation_running:
+                try:
+                    await processing_message.edit_text(
+                        loading_message_text + loading_emojis[index % len(loading_emojis)],
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                    index += 1
+                    await asyncio.sleep(1) # Slower animation for AI thinking
+                except Exception as e:
+                    logger.debug(f"Gemini loading animation error: {e}")
+                    break
+
+        animation_task = asyncio.create_task(animate_loading_gemini())
+
+        try:
+            # Send message to Gemini
+            response = await asyncio.to_thread(gemini_conversations[user_id].send_message, user_message)
+            gemini_text_response = response.text
             
-            # Clear the state immediately so it doesn't try to process future messages
-            user_data['state'] = None
-            user_data['platform'] = None
+            # Escape Gemini's response for MarkdownV2
+            escaped_gemini_response = escape_markdown_v2(gemini_text_response)
 
-            # Call the universal download function
-            await download_content_from_url(update, context, platform_in_state, url)
-            return # Consume the message if it's a URL for download
+            animation_running = False # Stop animation
+            await animation_task # Ensure the animation task finishes
+            
+            await processing_message.edit_text(
+                escaped_gemini_response,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            logger.info(f"Gemini replied to user {user_id}: {gemini_text_response[:50]}...") # Log first 50 chars
+        except Exception as e:
+            logger.error(f"Error during Gemini chat for user {user_id}: {e}", exc_info=True)
+            animation_running = False # Stop animation
+            if not animation_task.done():
+                animation_task.cancel()
+                try: await animation_task
+                except asyncio.CancelledError: pass
 
-    # If it's not a URL for download, it's just a regular message.
-    # We could add a default response here if needed, but for now, it just records.
-    # Example: await update.message.reply_text(escape_markdown_v2("I didn't understand that. Please use the buttons or commands."))
+            await processing_message.edit_text(
+                escape_markdown_v2("I'm sorry, I couldn't process your request with ✨ Gemini right now. Please try again later."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        return # Consume the message if it's a Gemini chat interaction
+
+    # Check if the user is in a state awaiting a URL
+    if user_data.get('state') == AWAITING_URL_STATE and user_data.get('platform'):
+        platform_in_state = user_data['platform']
+        url = update.message.text
+        
+        # Clear the state immediately so it doesn't try to process future messages
+        user_data['state'] = None
+        user_data['platform'] = None
+
+        # Call the universal download function
+        await download_content_from_url(update, context, platform_in_state, url)
+        return # Consume the message if it's a URL for download
+
+    # If it's not a URL for download or a Gemini chat, it's just a regular message.
+    # Provide a default "I didn't understand" message with the main keyboard.
+    await update.message.reply_text(
+        escape_markdown_v2("I didn't understand that. Please use the buttons below to interact with me, or send a valid URL after selecting a download option."),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")], [KeyboardButton("Help")]],
+            one_time_keyboard=False,
+            resize_keyboard=True
+        )
+    )
 
 
 async def handle_keyboard_download_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the 'Download Videos/Audio' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, button_pressed="Download Videos/Audio")
 
     # Call the existing show_download_options logic.
-    # show_download_options is designed to work with both CallbackQuery and direct Message updates.
     await show_download_options(update, context)
 
 async def handle_keyboard_help_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the 'Help' keyboard button press."""
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, button_pressed="Help")
     
     # Call the existing help_command logic
     await help_command(update, context)
 
+async def handle_keyboard_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the '✨ Gemini' keyboard button press."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context, button_pressed="✨ Gemini")
+
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+
+    # Set user state to Gemini chat
+    context.user_data['state'] = GEMINI_STATE
+    
+    # Initialize a new conversation or get existing one
+    if user_id not in gemini_conversations:
+        gemini_conversations[user_id] = GEMINI_MODEL.start_chat(history=[])
+        logger.info(f"Started new Gemini conversation for user {user_id}")
+    else:
+        logger.info(f"Resuming Gemini conversation for user {user_id}")
+    
+    # Provide options to exit Gemini chat
+    keyboard = [[KeyboardButton("⬅️ Exit Gemini Chat")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
+
+    await update.message.reply_text(
+        escape_markdown_v2("Hello! I'm ✨ Gemini. I'm ready to chat with you.\n\n"
+                           "What's on your mind today? Ask me anything!"),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=reply_markup
+    )
+
+async def handle_exit_gemini_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the '⬅️ Exit Gemini Chat' keyboard button press."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context, button_pressed="⬅️ Exit Gemini Chat")
+
+    user_id = update.message.from_user.id
+    context.user_data['state'] = None # Clear state
+    
+    # Remove conversation history
+    if user_id in gemini_conversations:
+        del gemini_conversations[user_id]
+        logger.info(f"Ended Gemini conversation for user {user_id}")
+
+    # Restore main keyboard
+    keyboard = [
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")],
+        [KeyboardButton("Help")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
+
+    await update.message.reply_text(
+        escape_markdown_v2("You've exited ✨ Gemini chat. How can I help you further?"),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=reply_markup
+    )
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -292,7 +451,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Call save_user_to_db here to ensure the command user is recorded and notification sent
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
 
     feedback_message = await update.message.reply_text(
         escape_markdown_v2("Fetching user list and preparing mentions, please wait..."),
@@ -417,34 +576,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Regular Keyboard (persistent, appears above message input)
         keyboard = [
-            [KeyboardButton("Download Videos/Audio")], # Text for the button
+            [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")], # Added Gemini button
             [KeyboardButton("Help")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
 
-        # Inline Keyboard (still useful for specific actions or dynamic options)
-        inline_keyboard = [
-            [InlineKeyboardButton("Download Videos/Audio (Inline)", callback_data="show_download_options")],
-            [InlineKeyboardButton("Help (Inline)", callback_data="help_button")]
-        ]
-        # inline_reply_markup = InlineKeyboardMarkup(inline_keyboard) # Defined but not used directly in reply_text for start
-
         await update.message.reply_text(
             escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
-            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info\\."),
+            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info\\. "
+            "You can also chat with ✨ Gemini for anything else you need\\!"), # Updated welcome message
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup # Use the ReplyKeyboardMarkup here
+            reply_markup=reply_markup
         )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
     # Ensure user is saved and notification sent if this is a direct /help command
     if update.message and update.message.from_user:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, button_pressed="Help (Command)")
 
     # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
-        [KeyboardButton("Download Videos/Audio")],
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("✨ Gemini")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
@@ -455,6 +608,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
         "- Send the full video/audio URL when prompted.\n\n"
+        "To Chat with ✨ Gemini (AI):\n"
+        "- Tap the '✨ Gemini' button on your keyboard.\n"
+        "- Ask me anything you want! I'll try my best to answer.\n"
+        "- To exit the conversation, tap the '⬅️ Exit Gemini Chat' button.\n\n"
         "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
         "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> *Turn off*.\n"
@@ -494,7 +651,9 @@ async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TY
     
     dummy_message = DummyMessage(from_user, chat_id, chat_type)
     dummy_update = Update(update_id=0, message=dummy_message)
-    await save_user_to_db(dummy_update, context)
+    # Pass 'Download Videos/Audio (Inline)' if from inline, else just 'Download Videos/Audio'
+    button_label = "Download Videos/Audio (Inline)" if update.callback_query else "Download Videos/Audio"
+    await save_user_to_db(dummy_update, context, button_pressed=button_label)
 
     keyboard = [
         [
@@ -543,13 +702,15 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
         
         dummy_message = DummyMessage(query.from_user, query.message.chat_id, query.message.chat.type)
         dummy_update = type('Update', (object,), {'message': dummy_message})()
-        await save_user_to_db(dummy_update, context)
+        # Parse the platform name from callback data for notification
+        platform_name_for_notification = query.data.split(":")[1]
+        await save_user_to_db(dummy_update, context, button_pressed=f"Selected Platform: {platform_name_for_notification}")
 
     # Parse the callback data: "download_platform:PLATFORM_NAME"
     platform_name = query.data.split(":")[1]
     
     # Set user state
-    context.user_data['state'] = 'awaiting_url'
+    context.user_data['state'] = AWAITING_URL_STATE
     context.user_data['platform'] = platform_name
 
     await query.edit_message_text(
@@ -578,7 +739,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be", "m.youtube.com"], # More comprehensive YouTube domains
+        "youtube": ["youtube.com", "youtu.be", "m.youtube.com", "youtube.com", "youtu.be"], # More comprehensive YouTube domains
         "soundcloud": "soundcloud.com"
     }
     
@@ -664,9 +825,6 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 
         # Optional: Add cookies.txt for platforms like Instagram/Facebook/YouTube that sometimes require it
-        # This requires you to create a 'cookies.txt' file in your bot's root directory
-        # containing cookies exported from a logged-in browser session.
-        # Use with caution, especially for public bots, due to security/privacy.
         if os.path.exists('cookies.txt'):
             ydl_opts['cookiefile'] = 'cookies.txt'
             logger.info("Using cookies.txt for download.")
@@ -679,7 +837,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             
             if info_dict.get('is_live'):
                 animation_running = False # Stop animation
-                await animation_task # Ensure the animation task finishes (or is cancelled)
+                if not animation_task.done():
+                    animation_task.cancel()
+                    try: await animation_task
+                    except asyncio.CancelledError: pass
+
                 await processing_message.edit_text(
                     escape_markdown_v2("Sorry, I cannot download live streams. Please provide a link to a completed video."),
                     parse_mode=ParseMode.MARKDOWN_V2
@@ -732,7 +894,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         # Decide whether to send as video/audio or document based on platform and size
         if platform_key == "soundcloud": # Always send audio as document
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done():
+                animation_task.cancel()
+                try: await animation_task
+                except asyncio.CancelledError: pass
+
             await processing_message.edit_text(
                 escape_markdown_v2(f"Audio downloaded! Sending as document ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -750,7 +916,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         elif file_size > TELEGRAM_VIDEO_LIMIT_BYTES:
             # Send as document if larger than 50MB (Telegram's send_video limit)
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done():
+                animation_task.cancel()
+                try: await animation_task
+                except asyncio.CancelledError: pass
+
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending as document due to size ({file_size / (1024*1024):.2f} MB). Please wait, this might take a while. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -768,7 +938,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         else:
             # Send as video if smaller than 50MB
             animation_running = False # Stop animation
-            await animation_task # Ensure the animation task finishes (or is cancelled)
+            if not animation_task.done():
+                animation_task.cancel()
+                try: await animation_task
+                except asyncio.CancelledError: pass
+
             await processing_message.edit_text(
                 escape_markdown_v2(f"Video downloaded! Sending in high quality ({file_size / (1024*1024):.2f} MB). Please wait. "),
                 parse_mode=ParseMode.MARKDOWN_V2
@@ -812,7 +986,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
             user_facing_error = "FFmpeg is not installed on the server, which is required to process this video. Please inform the bot administrator."
         
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done():
+            animation_task.cancel()
+            try: await animation_task
+            except asyncio.CancelledError: pass
+
         await processing_message.edit_text(
             escape_markdown_v2(f"Failed to download the {platform} content: `{escape_markdown_v2(user_facing_error)}`\n\n"
                                "Please ensure the link is public and valid. Try again later."),
@@ -821,7 +999,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     except FileNotFoundError as e:
         logger.error(f"File system error during {platform} download for {content_url}: {e}")
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done():
+            animation_task.cancel()
+            try: await animation_task
+            except asyncio.CancelledError: pass
+
         await processing_message.edit_text(
             escape_markdown_v2(f"A file error occurred: `{escape_markdown_v2(str(e))}`\n\n"
                                "The content might not have been downloaded correctly. Please try again. "),
@@ -830,7 +1012,11 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"General error processing {platform} download for {content_url}: {e}", exc_info=True)
         animation_running = False # Stop animation
-        await animation_task # Ensure the animation task finishes (or is cancelled)
+        if not animation_task.done():
+            animation_task.cancel()
+            try: await animation_task
+            except asyncio.CancelledError: pass
+
         await processing_message.edit_text(
             escape_markdown_v2(f"An unexpected error occurred while processing your request: `{escape_markdown_v2(str(e))}`\n\n"
                                "Please try again later. If the issue persists, contact support. "),
@@ -860,71 +1046,71 @@ async def tiktok_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # If called via button flow, content_url will be None, and the record_user_message handles it.
     if context.args:
         # Ensure user is saved and notification sent
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "TikTok", context.args[0])
     else:
         # Ensure user is saved and notification sent even if command is incomplete
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def fb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "Facebook", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def insta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "Instagram", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def pinterest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "Pinterest", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def twitter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "Twitter", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "YouTube", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
 
 async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await download_content_from_url(update, context, "SoundCloud", context.args[0])
     else:
-        await save_user_to_db(update, context)
+        await save_user_to_db(update, context, event_details=update.message.text)
         await update.message.reply_text(
             escape_markdown_v2("Please use the 'Download Videos/Audio' button to select a platform, then send the URL.")
         )
@@ -935,7 +1121,7 @@ def main() -> None:
     """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers
+    # Command Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
@@ -955,6 +1141,8 @@ def main() -> None:
     # Use filters.Regex to match the exact button text.
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^✨ Gemini$"), handle_keyboard_gemini_button)) # NEW: Gemini button
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^⬅️ Exit Gemini Chat$"), handle_exit_gemini_button)) # NEW: Exit Gemini button
 
     # 2. Callback Query Handlers for inline buttons
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
@@ -963,6 +1151,7 @@ def main() -> None:
 
     # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
     # This handler will also save user info and handle URLs when in 'awaiting_url' state.
+    # It now also handles Gemini conversations based on user state.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
     logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
