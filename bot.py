@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 1. Hardcoded Bot Token
-BOT_TOKEN = "7806461656:AAEpUb79cc1vmH75N1fc00fYuqSuE4JrW0Y"
+BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
