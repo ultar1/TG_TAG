@@ -892,7 +892,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     os.makedirs(temp_dir_name, exist_ok=True)
     
     # Loading animation setup
-    loading_emojis = ["\u{1F550}", "\u{1F551}", "\u{1F552}", "\u{1F553}", "\u{1F554}", "\u{1F555}", "\u{1F556}", "\u{1F557}", "\u{1F558}", "\u{1F559}", "\u{1F55A}", "\u{1F55B}"] # No emojis here, just for reference
+    loading_emojis = ["\U0001F550", "\U0001F551", "\U0001F552", "\U0001F553", "\U0001F554", "\U0001F555", "\U0001F556", "\U0001F557", "\U0001F558", "\U0001F559", "\U0001F55A", "\U0001F55B"]
     loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait... ")
     processing_message = await update.message.reply_text(
         loading_message_text, # Initial message without emoji
