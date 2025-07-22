@@ -6,8 +6,17 @@ import uuid # For unique filenames
 import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
+import PyPDF2 # New: For PDF text extraction
+from PIL import Image # New: For image handling
+import pytesseract # New: For OCR
+import nltk # New: For NLTK data downloads
+from sumy.parsers.plaintext import PlaintextParser # New: For summarization
+from sumy.nlp.tokenizers import Tokenizer # New: For summarization
+from sumy.summarizers.lex_rank import LexRankSummarizer # New: For summarization
+from sumy.nlp.stemmers import Stemmer # New: For summarization
+from sumy.utils import get_stop_words # New: For summarization
 
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton # Added ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String, UniqueConstraint
@@ -23,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 1. Hardcoded Bot Token
-BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU"
+BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboF_b4b58UhsgU"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -85,6 +94,27 @@ Session = sessionmaker(bind=engine)
 MAX_MENTIONS_PER_MESSAGE = 50
 MAX_MESSAGE_LENGTH = 4096
 
+# --- NLTK Data Download (for summarization) ---
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except nltk.downloader.DownloadError:
+    logger.info("NLTK 'punkt' or 'stopwords' not found. Attempting to download...")
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('stopwords', quiet=True)
+        logger.info("NLTK 'punkt' and 'stopwords' downloaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to download NLTK data: {e}. Summarization might not work correctly.")
+
+# --- Tesseract OCR Path (for image summarization) ---
+# ⚠️ Important: If Tesseract is not in your PATH, specify its path here.
+# For example, on Windows:
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# On Linux (might be /usr/bin/tesseract or similar):
+# pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+# Please ensure Tesseract OCR is installed on your system.
+
 # --- Helper Functions ---
 def escape_markdown_v2(text: str) -> str:
     """Escapes common MarkdownV2 special characters."""
@@ -127,7 +157,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     escaped_chat_type = escape_markdown_v2(chat_type)
     
     notification_message = (
-        f"🔔 New User Interaction\\! 🔔\n\n"
+        f"New User Interaction!\n\n"
         f"Event Type: *{escaped_event_type}*\n"
         f"User ID: `{user_id}`\n"
         f"First Name: *{escaped_first_name}*\n"
@@ -217,6 +247,69 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     finally:
         session.close()
 
+# --- Summarization Helper Functions ---
+
+def read_pdf_and_extract_text(pdf_path):
+    """
+    Reads a PDF file and extracts all text.
+    """
+    text = ""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            for page_num in range(len(reader.pages)):
+                page = reader.pages[page_num]
+                page_text = page.extract_text()
+                if page_text: # Only append if text was found
+                    text += page_text + "\n" # Add newline between pages
+        return text.strip() # Remove leading/trailing whitespace
+    except PyPDF2.errors.PdfReadError as e:
+        logger.error(f"PyPDF2 error reading PDF {pdf_path}: {e}")
+        raise ValueError(f"Could not read PDF file: {e}. It might be corrupted or password protected.")
+    except Exception as e:
+        logger.error(f"Error reading PDF {pdf_path}: {e}")
+        raise
+    
+def read_image_and_extract_text(image_path):
+    """
+    Reads an image file and extracts text using OCR.
+    """
+    try:
+        image = Image.open(image_path)
+        # Convert to RGB if not already, as Tesseract expects RGB or grayscale
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        text = pytesseract.image_to_string(image)
+        return text.strip()
+    except pytesseract.TesseractNotFoundError:
+        logger.error("Tesseract is not installed or not in your PATH. Please install it.")
+        raise RuntimeError("Tesseract OCR engine not found. Please ensure it's installed and accessible.")
+    except Exception as e:
+        logger.error(f"Error reading image or performing OCR on {image_path}: {e}")
+        raise
+
+def summarize_text(text, language="english", sentences_count=5):
+    """
+    Summarizes the given text using the LexRank algorithm.
+    """
+    if not text or len(text.strip()) < 50: # Minimum text length for meaningful summary
+        return "The provided text is too short to generate a meaningful summary."
+
+    try:
+        parser = PlaintextParser.from_string(text, Tokenizer(language))
+        stemmer = Stemmer(language)
+        summarizer = LexRankSummarizer(stemmer)
+        summarizer.stop_words = get_stop_words(language)
+
+        summary = summarizer(parser.document, sentences_count)
+        return "\n".join([str(sentence) for sentence in summary])
+    except LookupError as e:
+        logger.error(f"NLTK data missing for summarization: {e}")
+        return "Error: Required NLTK data (punkt or stopwords) for summarization is missing. Please contact the bot administrator."
+    except Exception as e:
+        logger.error(f"Error during text summarization: {e}")
+        return "An error occurred during summarization. The text might be too complex or unstructured."
+
 # --- Command Handlers ---
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -242,8 +335,17 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Call the universal download function
             await download_content_from_url(update, context, platform_in_state, url)
             return # Consume the message if it's a URL for download
+        
+        # Check if the user is in a state awaiting a file for summarization
+        if user_data.get('state') == 'awaiting_file_for_summary':
+            await update.message.reply_text(
+                escape_markdown_v2("Please send a *PDF document* or an *image with text* for summarization, not a text message."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
 
-    # If it's not a URL for download, it's just a regular message.
+
+    # If it's not a URL for download, or a file for summary, it's just a regular message.
     # We could add a default response here if needed, but for now, it just records.
     # Example: await update.message.reply_text(escape_markdown_v2("I didn't understand that. Please use the buttons or commands."))
 
@@ -265,6 +367,13 @@ async def handle_keyboard_help_button(update: Update, context: ContextTypes.DEFA
     # Call the existing help_command logic
     await help_command(update, context)
 
+async def handle_keyboard_summarize_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Summarize PDF/Image' keyboard button press."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+    
+    # Call the existing summarize_command logic
+    await summarize_command(update, context)
 
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -396,7 +505,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             successful_sends += 1
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(messages_to_tag_links)} for chat {chat_id}: {e}")
+            logger.error(f"Telegram API: Failed to send tagged message part {i+1}/{len(members_to_tag_links)} for chat {chat_id}: {e}")
 
     if successful_sends == len(messages_to_send):
         await feedback_message.edit_text(
@@ -417,7 +526,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Regular Keyboard (persistent, appears above message input)
         keyboard = [
-            [KeyboardButton("Download Videos/Audio")], # Text for the button
+            [KeyboardButton("Download Videos/Audio"), KeyboardButton("Summarize PDF/Image")], # Added summarize button
             [KeyboardButton("Help")]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
@@ -425,13 +534,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Inline Keyboard (still useful for specific actions or dynamic options)
         inline_keyboard = [
             [InlineKeyboardButton("Download Videos/Audio (Inline)", callback_data="show_download_options")],
+            [InlineKeyboardButton("Summarize PDF/Image (Inline)", callback_data="summarize_button")], # Added inline summarize button
             [InlineKeyboardButton("Help (Inline)", callback_data="help_button")]
         ]
         # inline_reply_markup = InlineKeyboardMarkup(inline_keyboard) # Defined but not used directly in reply_text for start
 
         await update.message.reply_text(
-            escape_markdown_v2("Hi there\\! I'm your multimedia download and group tagging bot\\.\n\n"
-            "To get started, tap 'Download Videos/Audio' on the keyboard below, or 'Help' for more info\\."),
+            escape_markdown_v2("Hi there! I'm your multimedia download and group tagging bot.\n\n"
+            "To get started, tap 'Download Videos/Audio' or 'Summarize PDF/Image' on the keyboard below, or 'Help' for more info."),
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup # Use the ReplyKeyboardMarkup here
         )
@@ -444,7 +554,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # For the help message, you can also include the ReplyKeyboardMarkup
     keyboard = [
-        [KeyboardButton("Download Videos/Audio")],
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Summarize PDF/Image")],
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
@@ -455,6 +565,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Tap the 'Download Videos/Audio' button on your keyboard or use the /download command.\n"
         "- Select the platform (TikTok, Facebook, Instagram, Pinterest, Twitter, YouTube, SoundCloud).\n"
         "- Send the full video/audio URL when prompted.\n\n"
+        "To Summarize PDFs and Images:\n"
+        "- Tap the 'Summarize PDF/Image' button or use the /summarize command.\n"
+        "- Send a PDF document or an image containing text when prompted.\n"
+        "- I will extract the text and provide a summary.\n\n"
         "To Tag Group Members:\n"
         "1. Add me to your group and make me an Administrator (this helps me exclude admins from tags).\n"
         "2. Crucial: Go to @BotFather -> My Bots -> (Your Bot) -> Bot Settings -> Group Privacy -> *Turn off*.\n"
@@ -467,7 +581,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Download functionality relies on `yt-dlp` and may not always work if the content is restricted or the platform changes its API, or if the file size exceeds Telegram's 2GB limit.\n"
         "- Some content might require a logged-in session or be geo-restricted.\n"
         "- I cannot tag users who have never sent a message since I joined.\n"
-        "- Very large groups might experience delays or split messages due to Telegram's limits."),
+        "- Very large groups might experience delays or split messages due to Telegram's limits.\n"
+        "- PDF/Image summarization relies on text extraction. Quality may vary for complex layouts, scanned PDFs, or low-quality images.\n"
+        "- For images, `Tesseract OCR` must be properly installed on the server."),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=reply_markup # Apply ReplyKeyboardMarkup here too
     )
@@ -557,6 +673,171 @@ async def handle_download_platform_selection(update: Update, context: ContextTyp
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
+async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Initiates the summarization process, asking the user to send a file."""
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+    
+    context.user_data['state'] = 'awaiting_file_for_summary'
+    context.user_data['file_type'] = None # Will be determined upon file receipt
+
+    # For the help message, you can also include the ReplyKeyboardMarkup
+    keyboard = [
+        [KeyboardButton("Download Videos/Audio"), KeyboardButton("Summarize PDF/Image")],
+        [KeyboardButton("Help")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=False, resize_keyboard=True)
+
+    # Acknowledge callback if it came from inline button
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            escape_markdown_v2("Please send me the *PDF document* or an *image with text* you want me to summarize."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    else: # From command or keyboard button
+        await update.message.reply_text(
+            escape_markdown_v2("Please send me the *PDF document* or an *image with text* you want me to summarize."),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
+
+async def summarize_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles the file received for summarization (PDF or image).
+    """
+    user_data = context.user_data
+    if user_data.get('state') != 'awaiting_file_for_summary':
+        # If not in the correct state, ignore or give a generic response
+        logger.info(f"Received file for summarization but not in awaiting state for user {update.effective_user.id}")
+        await update.message.reply_text(
+            escape_markdown_v2("Please use the /summarize command first, then send your PDF or image."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    # Clear the state immediately
+    user_data['state'] = None
+    user_data['file_type'] = None
+
+    file_to_process = None
+    file_extension = None
+    
+    if update.message.document:
+        # Check if it's a PDF
+        if update.message.document.mime_type == 'application/pdf':
+            file_to_process = update.message.document
+            file_extension = "pdf"
+        else:
+            await update.message.reply_text(
+                escape_markdown_v2("I can only summarize PDF documents. Please send a PDF or an image."),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return
+    elif update.message.photo:
+        # Get the largest photo size
+        file_to_process = update.message.photo[-1]
+        file_extension = "image"
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2("Please send a *PDF document* or an *image with text* for summarization."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+
+    # Save user info for this interaction
+    if update.message and update.message.from_user:
+        await save_user_to_db(update, context)
+
+    temp_dir_name = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir_name, exist_ok=True)
+    temp_file_path = os.path.join(temp_dir_name, f"input_file.{'pdf' if file_extension == 'pdf' else 'png'}")
+
+    loading_emojis = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+    loading_message_text = escape_markdown_v2(f"Downloading and processing your {'PDF' if file_extension == 'pdf' else 'image'} for summarization, please wait... ")
+    processing_message = await update.message.reply_text(
+        loading_message_text + loading_emojis[0],
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+    animation_running = True
+    async def animate_loading():
+        index = 0
+        while animation_running:
+            try:
+                await processing_message.edit_text(
+                    loading_message_text + loading_emojis[index % len(loading_emojis)],
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                index += 1
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug(f"Loading animation error: {e}")
+                break
+
+    animation_task = asyncio.create_task(animate_loading())
+
+    extracted_text = ""
+    try:
+        # Download the file
+        file = await context.bot.get_file(file_to_process.file_id)
+        await file.download_to_drive(temp_file_path)
+        logger.info(f"Downloaded file for summarization to: {temp_file_path}")
+
+        if file_extension == "pdf":
+            extracted_text = read_pdf_and_extract_text(temp_file_path)
+        elif file_extension == "image":
+            extracted_text = read_image_and_extract_text(temp_file_path)
+        
+        if not extracted_text:
+            raise ValueError("No text could be extracted from the file. It might be an image without clear text, a malformed PDF, or a scanned PDF without OCR capabilities.")
+        
+        logger.info(f"Extracted {len(extracted_text)} characters for summarization.")
+
+        summary = summarize_text(extracted_text)
+        
+        animation_running = False
+        await animation_task
+        await processing_message.delete()
+
+        await update.message.reply_text(
+            escape_markdown_v2(f"Here is the summary of your {'PDF' if file_extension == 'pdf' else 'image'}:\n\n") +
+            escape_markdown_v2(summary),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+    except (ValueError, RuntimeError) as e:
+        logger.error(f"Summarization specific error: {e}")
+        animation_running = False
+        await animation_task
+        await processing_message.edit_text(
+            escape_markdown_v2(f"Error during summarization: `{escape_markdown_v2(str(e))}`"),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except Exception as e:
+        logger.error(f"General error during summarization for user {update.effective_user.id}: {e}", exc_info=True)
+        animation_running = False
+        await animation_task
+        await processing_message.edit_text(
+            escape_markdown_v2(f"An unexpected error occurred during summarization: `{escape_markdown_v2(str(e))}`\n\n"
+                               "Please try again or contact support."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    finally:
+        animation_running = False
+        if not animation_task.done():
+            animation_task.cancel()
+            try:
+                await animation_task
+            except asyncio.CancelledError:
+                pass
+
+        if os.path.exists(temp_dir_name):
+            try:
+                shutil.rmtree(temp_dir_name)
+                logger.info(f"Cleaned up temporary directory: {temp_dir_name}")
+            except OSError as e:
+                logger.error(f"Error removing temporary directory {temp_dir_name}: {e}")
 
 # --- Universal Video/Audio Download Handler ---
 
@@ -578,7 +859,7 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         "insta": "instagram.com",
         "pinterest": "pinterest.com",
         "twitter": "twitter.com",
-        "youtube": ["youtube.com", "youtu.be", "m.youtube.com"], # More comprehensive YouTube domains
+        "youtube": ["youtube.com", "youtu.be"], # More comprehensive YouTube domains
         "soundcloud": "soundcloud.com"
     }
     
@@ -611,10 +892,10 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     os.makedirs(temp_dir_name, exist_ok=True)
     
     # Loading animation setup
-    loading_emojis = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+    loading_emojis = ["\u{1F550}", "\u{1F551}", "\u{1F552}", "\u{1F553}", "\u{1F554}", "\u{1F555}", "\u{1F556}", "\u{1F557}", "\u{1F558}", "\u{1F559}", "\u{1F55A}", "\u{1F55B}"] # No emojis here, just for reference
     loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait... ")
     processing_message = await update.message.reply_text(
-        loading_message_text + loading_emojis[0],
+        loading_message_text, # Initial message without emoji
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
@@ -624,8 +905,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         index = 0
         while animation_running:
             try:
+                # Removed emojis, so this will just update the base message
                 await processing_message.edit_text(
-                    loading_message_text + loading_emojis[index % len(loading_emojis)],
+                    loading_message_text,
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
                 index += 1
@@ -939,6 +1221,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("tag", tag_all))
+    application.add_handler(CommandHandler("summarize", summarize_command)) # New summarization command
     
     # Register the command handlers for explicit /command <url> usage (if desired, currently prompts)
     application.add_handler(CommandHandler("tiktok", tiktok_command))
@@ -954,14 +1237,22 @@ def main() -> None:
     # 1. Specific Message Handlers for Keyboard Buttons
     # Use filters.Regex to match the exact button text.
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Videos/Audio$"), handle_keyboard_download_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize PDF/Image$"), handle_keyboard_summarize_button)) # New keyboard handler
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), handle_keyboard_help_button))
 
     # 2. Callback Query Handlers for inline buttons
     application.add_handler(CallbackQueryHandler(show_download_options, pattern="^show_download_options$"))
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^download_platform:"))
+    application.add_handler(CallbackQueryHandler(summarize_command, pattern="^summarize_button$")) # New inline callback handler
     application.add_handler(CallbackQueryHandler(help_command, pattern="^help_button$"))
 
-    # 3. General Message Handler (LAST, to catch everything else, but exclude commands)
+    # 3. Message handler for files (PDFs and images) when in summarization state
+    application.add_handler(MessageHandler(
+        filters.Document.PDF | filters.PHOTO, # Filter for PDF documents and photos
+        summarize_file # This will handle the actual file processing for summarization
+    ))
+
+    # 4. General Message Handler (LAST, to catch everything else, but exclude commands)
     # This handler will also save user info and handle URLs when in 'awaiting_url' state.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
