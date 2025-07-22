@@ -6,15 +6,15 @@ import uuid # For unique filenames
 import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
-import PyPDF2 # New: For PDF text extraction
-from PIL import Image # New: For image handling
-import pytesseract # New: For OCR
-import nltk # New: For NLTK data downloads
-from sumy.parsers.plaintext import PlaintextParser # New: For summarization
-from sumy.nlp.tokenizers import Tokenizer # New: For summarization
-from sumy.summarizers.lex_rank import LexRankSummarizer # New: For summarization
-from sumy.nlp.stemmers import Stemmer # New: For summarization
-from sumy.utils import get_stop_words # New: For summarization
+import PyPDF2 # For PDF text extraction
+from PIL import Image # For image handling
+import pytesseract # For OCR
+import nltk # For NLTK data downloads
+from sumy.parsers.plaintext import PlaintextParser # For summarization
+from sumy.nlp.tokenizers import Tokenizer # For summarization
+from sumy.summarizers.lex_rank import LexRankSummarizer # For summarization
+from sumy.nlp.stemmers import Stemmer # For summarization
+from sumy.utils import get_stop_words # For summarization
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
@@ -22,7 +22,7 @@ from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
+from sqlalchemy.types import BigInteger # Import BigInteger for larger IDs
 import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
 
 # --- Configuration ---
@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 1. Hardcoded Bot Token
-BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboF_b4b58UhsgU"
+BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -94,26 +94,22 @@ Session = sessionmaker(bind=engine)
 MAX_MENTIONS_PER_MESSAGE = 50
 MAX_MESSAGE_LENGTH = 4096
 
-# --- NLTK Data Download (for summarization) ---
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('corpora/stopwords')
-except nltk.downloader.DownloadError:
-    logger.info("NLTK 'punkt' or 'stopwords' not found. Attempting to download...")
-    try:
-        nltk.download('punkt', quiet=True)
-        nltk.download('stopwords', quiet=True)
-        logger.info("NLTK 'punkt' and 'stopwords' downloaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to download NLTK data: {e}. Summarization might not work correctly.")
+# --- NLTK Data Path Configuration for Heroku Buildpack ---
+# The NLTK buildpack will download data to /app/nltk_data during the release phase.
+# We need to tell NLTK where to find it.
+nltk_data_path_heroku = os.path.join(os.getcwd(), "nltk_data") # This will resolve to /app/nltk_data on Heroku
+if nltk_data_path_heroku not in nltk.data.path:
+    nltk.data.path.append(nltk_data_path_heroku)
+logger.info(f"Configured NLTK data path: {nltk_data_path_heroku}. NLTK data is expected to be installed by buildpack.")
+# No need for runtime download logic here; it's handled by the 'release' step in Procfile.
+
 
 # --- Tesseract OCR Path (for image summarization) ---
-# ⚠️ Important: If Tesseract is not in your PATH, specify its path here.
-# For example, on Windows:
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-# On Linux (might be /usr/bin/tesseract or similar):
-# pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-# Please ensure Tesseract OCR is installed on your system.
+# When using heroku-buildpack-apt to install tesseract-ocr, it's typically added to PATH.
+# However, if issues arise, you might uncomment and adjust this:
+# pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract' # Common path for Heroku/Linux
+# Please ensure Tesseract OCR is installed on your system via Aptfile and buildpack.
+
 
 # --- Helper Functions ---
 def escape_markdown_v2(text: str) -> str:
@@ -282,7 +278,7 @@ def read_image_and_extract_text(image_path):
         text = pytesseract.image_to_string(image)
         return text.strip()
     except pytesseract.TesseractNotFoundError:
-        logger.error("Tesseract is not installed or not in your PATH. Please install it.")
+        logger.error("Tesseract is not installed or not in your PATH. Please ensure it's installed and accessible via the Heroku buildpack.")
         raise RuntimeError("Tesseract OCR engine not found. Please ensure it's installed and accessible.")
     except Exception as e:
         logger.error(f"Error reading image or performing OCR on {image_path}: {e}")
@@ -304,8 +300,8 @@ def summarize_text(text, language="english", sentences_count=5):
         summary = summarizer(parser.document, sentences_count)
         return "\n".join([str(sentence) for sentence in summary])
     except LookupError as e:
-        logger.error(f"NLTK data missing for summarization: {e}")
-        return "Error: Required NLTK data (punkt or stopwords) for summarization is missing. Please contact the bot administrator."
+        logger.error(f"NLTK data missing for summarization: {e}. Please ensure NLTK data (punkt, stopwords) are downloaded by the buildpack.")
+        return "Error: Required NLTK data for summarization is missing. Please contact the bot administrator."
     except Exception as e:
         logger.error(f"Error during text summarization: {e}")
         return "An error occurred during summarization. The text might be too complex or unstructured."
@@ -753,23 +749,22 @@ async def summarize_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     os.makedirs(temp_dir_name, exist_ok=True)
     temp_file_path = os.path.join(temp_dir_name, f"input_file.{'pdf' if file_extension == 'pdf' else 'png'}")
 
-    loading_emojis = ["🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚", "🕛"]
+    # No emojis here, just for reference: loading_emojis = ["\U0001F550", "\U0001F551", ...]
     loading_message_text = escape_markdown_v2(f"Downloading and processing your {'PDF' if file_extension == 'pdf' else 'image'} for summarization, please wait... ")
     processing_message = await update.message.reply_text(
-        loading_message_text + loading_emojis[0],
+        loading_message_text, # Initial message without emoji
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
     animation_running = True
     async def animate_loading():
-        index = 0
+        # Removed emoji array, so no indexing. Just keep updating the message.
         while animation_running:
             try:
                 await processing_message.edit_text(
-                    loading_message_text + loading_emojis[index % len(loading_emojis)],
+                    loading_message_text,
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
-                index += 1
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logger.debug(f"Loading animation error: {e}")
@@ -892,25 +887,22 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     os.makedirs(temp_dir_name, exist_ok=True)
     
     # Loading animation setup
-    loading_emojis = ["\U0001F550", "\U0001F551", "\U0001F552", "\U0001F553", "\U0001F554", "\U0001F555", "\U0001F556", "\U0001F557", "\U0001F558", "\U0001F559", "\U0001F55A", "\U0001F55B"]
     loading_message_text = escape_markdown_v2(f"Getting your {platform} content, please wait... ")
     processing_message = await update.message.reply_text(
-        loading_message_text, # Initial message without emoji
+        loading_message_text, # Initial message
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
     # Flag to control the animation loop
     animation_running = True
     async def animate_loading():
-        index = 0
+        # No emojis, just updating the same text
         while animation_running:
             try:
-                # Removed emojis, so this will just update the base message
                 await processing_message.edit_text(
                     loading_message_text,
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
-                index += 1
                 await asyncio.sleep(0.5) # Update every half second
             except Exception as e:
                 # Catch exceptions if message is deleted or inaccessible
