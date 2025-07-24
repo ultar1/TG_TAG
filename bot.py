@@ -7,14 +7,16 @@ import shutil # For removing directories
 import datetime # Import for timestamp in notification
 import time # Import for time-based notification throttling
 
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton # Added ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, UniqueConstraint
+# FIX: Added Column and String to the import list from sqlalchemy
+from sqlalchemy import create_engine, Column, String, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
-import yt_dlp # Make sure yt-dlp is installed: pip install yt-dlp
+from sqlalchemy.types import BigInteger
+import yt_dlp
+
 
 # --- Configuration ---
 logging.basicConfig(
