@@ -10,7 +10,7 @@ import time # Import for time-based notification throttling
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton # Added ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
-from sqlalchemy import create_engine, Column, String, UniqueConstraint
+from sqlalchemy import create_engine, Column, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.types import BigInteger # NEW: Import BigInteger for larger IDs
@@ -28,7 +28,7 @@ BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Define a temporary directory for downloads
-# On Heroku, this will be in the ephemeral filesystem
+# On cloud platforms like Render, this will be in the ephemeral filesystem
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True) # Create if it doesn't exist
 
@@ -48,11 +48,29 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 if not DATABASE_URL:
-    logger.critical("DATABASE_URL environment variable not set. Please add Heroku Postgres add-on. Exiting.")
+    logger.critical("DATABASE_URL environment variable not set. Please add a database. Exiting.")
     sys.exit(1)
 
+# Ensure correct Postgres connection string for SQLAlchemy
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# --- Webhook Configuration for Render (NEW/MODIFIED) ---
+# Render will provide the PORT environment variable
+PORT = int(os.environ.get('PORT', 8080)) # Common default for Render is 10000, but 8080 is also used by some setups
+# On Render, your service's URL is available as an environment variable (e.g., RENDER_EXTERNAL_HOSTNAME)
+# Or you can construct it from your service name.
+# For simplicity and robustness, it's best to set WEBHOOK_URL_BASE as an environment variable on Render.
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE") # e.g., https://your-render-service.onrender.com
+WEBHOOK_PATH = "/telegram" # This is the path your bot will listen on
+
+if not WEBHOOK_URL_BASE:
+    logger.warning("WEBHOOK_URL_BASE environment variable not set. Running in polling mode. "
+                   "Set WEBHOOK_URL_BASE for webhook deployment (e.g., on Render).")
+    RUN_AS_WEBHOOK = False
+else:
+    RUN_AS_WEBHOOK = True
+    logger.info(f"WEBHOOK_URL_BASE is set. Running in webhook mode on port {PORT}.")
 
 # --- Database Setup ---
 Base = declarative_base()
@@ -92,7 +110,7 @@ def escape_markdown_v2(text: str) -> str:
         return ""
     
     # Correct list of special characters for MarkdownV2, including backslash itself to be handled first.
-    special_chars = r'_*[]()~`>#+-=|{}.!'
+    special_chars = r'_*[]()~`>#+-|=|{}.!'
     
     # Process backslashes first, then other special characters
     escaped_text = text.replace('\\', '\\\\')
@@ -123,7 +141,7 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     # before concatenating them.
     escaped_event_type = escape_markdown_v2(event_type)
     escaped_first_name = escape_markdown_v2(first_name)
-    escaped_username = escape_markdown_v2(username) if username != 'N/A' else 'N/A'
+    escaped_username = escape_markdown_v2(username) if escaped_username != 'N/A' else 'N/A'
     escaped_chat_type = escape_markdown_v2(chat_type)
     
     notification_message = (
@@ -930,7 +948,7 @@ async def soundcloud_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-# --- Main Bot Logic and Heroku Integration ---
+# --- Main Bot Logic and Render Integration ---
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
@@ -965,8 +983,20 @@ def main() -> None:
     # This handler will also save user info and handle URLs when in 'awaiting_url' state.
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
-    logger.info("Running in polling mode. If deployed on Heroku, ensure this is on a WORKER dyno.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # --- Webhook or Polling execution (MODIFIED for Render) ---
+    if RUN_AS_WEBHOOK:
+        # Set up the webhook
+        application.run_webhook(
+            listen="0.0.0.0", # Listen on all available interfaces (Render requires this)
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=WEBHOOK_URL_BASE + WEBHOOK_PATH
+        )
+        logger.info(f"Bot started in webhook mode on port {PORT}, URL: {WEBHOOK_URL_BASE}{WEBHOOK_PATH}")
+    else:
+        logger.info("Running in polling mode. If deployed on Render, ensure WEBHOOK_URL_BASE is not set and this is a background worker if you're not expecting HTTP traffic.")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
+
