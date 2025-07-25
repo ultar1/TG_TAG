@@ -12,14 +12,13 @@ import json
 from bs4 import BeautifulSoup
 import base64
 import openai
-import fitz  # PyMuPDF
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, IntegrityError
 from sqlalchemy.types import BigInteger
 import yt_dlp
 
@@ -32,7 +31,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-4o").strip() # Using gpt-4o for image analysis
+GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-4o").strip()
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
@@ -109,17 +108,17 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
-# --- Command Logic ---
+# --- Command Logic Functions ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "**Bot Commands Guide:**\n\n"
         "**AI Tools**\n"
         "- `Chat with AI`: Talk to an AI.\n"
         "- `Create Image`: Generate an image from text.\n"
-        "- `Animate Image`: Reply to an image with `/animate` to create a short video.\n"
-        "- `Upscale Image`: Reply to an image with `/upscale` to improve its quality.\n"
+        "- `Animate Image`: Reply to an image with /animate to create a short video.\n"
+        "- `Upscale Image`: Reply to an image with /upscale to improve its quality.\n"
         "- `Summarize Link`: Get a summary of a web article.\n"
-        "- `Summarize File`: Reply to an image or PDF with `/summarize_file`.\n\n"
+        "- `Summarize File`: Reply to an image or PDF with /summarize_file.\n\n"
         "**Media Tools**\n"
         "- `Play Music / Video`: Searches YouTube for a song or video.\n"
         "- `Download Media`: Downloads video/audio from sites like TikTok, etc.\n\n"
@@ -320,12 +319,13 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_play_audio_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
+    url = f"https://www.youtube.com/watch?v={video_id}"
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Downloading audio...")
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): audio_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(f"m.youtube.com{video_id}", download=True)
+        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(url, download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
@@ -339,12 +339,13 @@ async def handle_play_audio_confirmation(update: Update, context: ContextTypes.D
 async def handle_play_video_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
+    url = f"https://www.youtube.com/watch?v={video_id}"
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Downloading video...")
     try:
         video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): video_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([f"youtu.be{video_id}"])
+        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([url])
         video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending video...")
         with open(video_path, 'rb') as video_file:
