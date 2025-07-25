@@ -169,6 +169,26 @@ async def read_text_from_image_command(update: Update, context: ContextTypes.DEF
              await feedback.edit_text("OCR processing failed. The Tesseract engine is not installed on the server.")
         else:
             await feedback.edit_text("Sorry, an error occurred while processing the image.")
+            
+## NEW ##
+# This function was missing but required for the "Translate Text" button to work
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_translate: str) -> None:
+    if not gemini_model:
+        await update.message.reply_text("Translate service is not configured.")
+        return
+    parts = text_to_translate.split(" ", 1)
+    if len(parts) < 2:
+        await update.message.reply_text("Please provide the text in the format: language text (e.g., Spanish Hello world)")
+        return
+    target_lang, text = parts
+    feedback = await update.message.reply_text(f"Translating to {target_lang}...")
+    try:
+        prompt = f"Translate the following text to {target_lang}: {text}"
+        response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        await feedback.edit_text(escape_markdown(response.text, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logger.error(f"Translate API error: {e}")
+        await feedback.edit_text("Sorry, an error occurred during translation.")
 
 async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     if not gemini_model: await update.message.reply_text("AI summarizer is not configured."); return
@@ -364,6 +384,50 @@ async def get_lyrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e: logger.error(f"Gemini lyrics fallback failed: {e}")
     await feedback.edit_text("Sorry, I couldn't find the lyrics for this song using any available method.")
 
+## NEW ##
+# This is the core function for the "Download Media" button.
+# It uses yt-dlp to download from almost any social media or video site URL.
+async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str) -> None:
+    feedback = await update.message.reply_text("Starting download...")
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir, exist_ok=True)
+    try:
+        # These are yt-dlp settings for downloading the best quality MP4 video
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
+            'http_headers': {'User-Agent': 'Mozilla/5.0'}
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            await feedback.edit_text("Downloading media from URL...")
+            ydl.download([content_url])
+
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files:
+            raise FileNotFoundError("yt-dlp finished but no file was found in the directory.")
+        
+        downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
+        
+        await feedback.edit_text("Download complete. Uploading to Telegram...")
+        with open(downloaded_file_path, 'rb') as f:
+            await context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=f,
+                supports_streaming=True
+            )
+        await feedback.delete()
+    except Exception as e:
+        logger.error(f"Generic download error for {content_url}: {e}")
+        await feedback.edit_text("Download failed. The link may be private, invalid, or from an unsupported site.")
+    finally:
+        # This is crucial to clean up the files from the server
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
@@ -395,15 +459,14 @@ async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text: return
     
-    # ✅ FIX: This list contains all button texts. The handler will ignore them.
     BUTTON_TEXTS = [
         "AI Tools", "Media Tools", "Utilities", "Help", "Back to Main Menu",
         "Chat with AI", "Create Image", "Read Text from Image", "Animate Image",
         "Upscale Image", "Summarize Link", "Summarize File", "Play Music / Video",
-        "Download Media", "Weather", "Crypto Prices", "Translate Text", "Tell a Joke"
+        "Download Media", "Weather", "Crypto Prices", "Translate Text", "Tell a Joke", "End Chat"
     ]
     if update.message.text in BUTTON_TEXTS:
-        return # This is a button press, not a reply to a prompt. Let the button handlers manage it.
+        return
 
     state = context.user_data.get('state')
     if state == 'continuous_chat': await gemini_command(update, context); return
@@ -419,6 +482,9 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         'awaiting_crypto_symbols': lambda: get_crypto_prices(update, context, crypto_ids=text),
         'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
         'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
+        ## NEW ##
+        # This connects the state set by the "Download Media" button to the download function.
+        'awaiting_download_url': lambda: download_content_from_url(update, context, content_url=text),
     }
     if state in state_handlers: await state_handlers[state]()
 
@@ -438,6 +504,9 @@ def main() -> None:
         ("Help", help_command), ("Chat with AI", start_ai_chat), ("End Chat", end_chat),
         ("Read Text from Image", lambda u,c: u.message.reply_text("Please reply to an image with /readtext to extract text from it.")),
         ("Play Music / Video", lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video?","Pressed 'Play'")),
+        ## NEW ##
+        # This is the handler for the "Download Media" button.
+        ("Download Media", lambda u,c: prompt_for_input(u,c,'awaiting_download_url', "Please send the URL of the video you want to download.", "Pressed 'Download Media'")),
         ("Create Image", lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")),
         ("Weather", lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")),
         ("Crypto Prices", lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs (e.g., bitcoin).","Pressed 'Crypto'")),
