@@ -14,5 +14,4 @@ beautifulsoup4
 openai
 PyMuPDF
 azapi
-tesseract-ocr
 googlesearch-python
