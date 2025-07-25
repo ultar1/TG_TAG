@@ -56,6 +56,7 @@ CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 SCREENSHOT_API_KEY = os.environ.get("SCREENSHOT_API_KEY")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 
 # --- Initial Checks ---
 if not all([BOT_TOKEN, DATABASE_URL, ADMIN_ID]):
@@ -142,7 +143,11 @@ async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
 
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")], [KeyboardButton("Back to Main Menu")]]
+    keyboard = [
+        [KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")],
+        [KeyboardButton("Search Movie")],
+        [KeyboardButton("Back to Main Menu")]
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
@@ -165,14 +170,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Bot Commands Guide:**\n\n"
         "You can use the menu buttons or the following commands:\n\n"
         "**/gemini <prompt>**: Ask the AI a question.\n"
-        "**/readtext**: Reply to an image to read text from it.\n"
         "**/create <prompt>**: Generate an image from text.\n"
-        "**/animate**: Reply to an image to create a video.\n"
-        "**/upscale**: Reply to an image to improve its quality.\n"
-        "**/summarize_file**: Reply to a PDF or image to summarize it.\n"
+        "**/movie <title>**: Get information about a movie.\n"
         "**/play <song name>**: Search and download a song or video.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
-        "**/riddle**: Get a random riddle.\n"
         "**/gmail**: Send an email (Admin only)."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
@@ -223,6 +224,72 @@ async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     context.user_data['state'] = 'awaiting_email_address'
     await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.")
+
+async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str = None) -> None:
+    """Fetches information about a movie from TMDb."""
+    if not TMDB_API_KEY:
+        await update.message.reply_text("Movie search service is not configured.")
+        return
+
+    if not title:
+        if not context.args:
+            await update.message.reply_text("Please provide a movie title. Usage: `/movie The Matrix`")
+            return
+        title = " ".join(context.args)
+
+    feedback = await update.message.reply_text(f"Searching for '{title}'...")
+
+    try:
+        search_url = f"https://api.themoviedb.org/3/search/movie"
+        search_params = {"api_key": TMDB_API_KEY, "query": title}
+        response = requests.get(search_url, params=search_params, timeout=10)
+        response.raise_for_status()
+        search_results = response.json()
+
+        if not search_results['results']:
+            await feedback.edit_text("Sorry, I couldn't find any movie with that title.")
+            return
+        
+        movie_id = search_results['results'][0]['id']
+
+        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}"
+        details_params = {"api_key": TMDB_API_KEY}
+        response = requests.get(details_url, params=details_params, timeout=10)
+        response.raise_for_status()
+        details = response.json()
+
+        movie_title = details.get('title', 'N/A')
+        release_year = details.get('release_date', '----').split('-')[0]
+        rating = f"{details.get('vote_average', 0):.1f}/10"
+        overview = details.get('overview', 'No summary available.')
+        genres = ", ".join([genre['name'] for genre in details.get('genres', [])])
+        poster_path = details.get('poster_path')
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+
+        caption = (
+            f"🎬 *{escape_markdown(movie_title, version=2)} ({release_year})*\n\n"
+            f"⭐ *Rating:* {rating}\n"
+            f"🎭 *Genres:* {genres}\n\n"
+            f"_{escape_markdown(overview, version=2)}_"
+        )
+
+        if poster_url:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=poster_url,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            await feedback.delete()
+        else:
+            await feedback.edit_text(caption, parse_mode=ParseMode.MARKDOWN_V2)
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"TMDb API request failed: {e}")
+        await feedback.edit_text("An error occurred while contacting the movie database.")
+    except Exception as e:
+        logger.error(f"Movie command failed: {e}")
+        await feedback.edit_text("An unexpected error occurred.")
 
 async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None) -> None:
     if not SCREENSHOT_API_KEY:
@@ -315,7 +382,7 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
         await feedback_message.edit_text(f"**Summary:**\n\n{summary}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"File summarization error: {e}")
-        await feedback_message.edit_text("Sorry, an error occurred while processing the file.")
+        await feedback.edit_text("Sorry, an error occurred while processing the file.")
 
 async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str = None) -> None:
     if not openai_client: await update.message.reply_text("Image generation service (OpenAI) is not configured."); return
@@ -604,6 +671,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
         'awaiting_download_url': lambda: download_content_from_url(update, context, content_url=text, platform=context.user_data.pop('platform', 'unknown')),
         'awaiting_screenshot_url': lambda: screenshot_command(update, context, url=text),
+        'awaiting_movie_title': lambda: movie_command(update, context, title=text),
     }
     if state in state_handlers: await state_handlers[state]()
 
@@ -618,7 +686,7 @@ def main() -> None:
         CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
         CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
-        CommandHandler("screenshot", screenshot_command),
+        CommandHandler("screenshot", screenshot_command), CommandHandler("movie", movie_command),
     ]
     
     menu_button_texts = {
@@ -635,6 +703,7 @@ def main() -> None:
         "Summarize Link": lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Please send the article link.","Pressed 'Summarize Link'"),
         "Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
         "Download Media": show_download_platform_options,
+        "Search Movie": lambda u,c: prompt_for_input(u,c,'awaiting_movie_title', "What movie are you looking for?","Pressed 'Search Movie'"),
         "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
         "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
         "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
@@ -643,7 +712,6 @@ def main() -> None:
         "Send Email (Admin)": gmail_command,
     }
     
-    # --- FIX for button handlers with special characters ---
     escaped_patterns = [re.escape(p) for p in menu_button_texts.keys()]
     msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(pattern)}$"), func) for pattern, func in menu_button_texts.items()]
     
@@ -656,7 +724,6 @@ def main() -> None:
     ]
 
     application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
-    # --- FIX for the general message handler to ignore all button texts ---
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(escaped_patterns)})$"), record_user_message))
     
     PORT = int(os.environ.get("PORT", 8443))
