@@ -10,10 +10,16 @@ from bs4 import BeautifulSoup
 import base64
 import fitz  # PyMuPDF
 import google.generativeai as genai
+import openai # For DALL-E 3
+import pytesseract # For OCR
+from PIL import Image # For OCR
+import io # For OCR
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
 from telegram.constants import ParseMode, ChatAction
+from telegram.helpers import escape_markdown
+
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import OperationalError, IntegrityError
@@ -24,7 +30,7 @@ import yt_dlp
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Environment Variables ---
+# --- Environment Variables & API Configurations ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = os.environ.get("ADMIN_ID")
@@ -32,28 +38,29 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# --- Initial Checks & API Configurations ---
 if not all([BOT_TOKEN, DATABASE_URL, ADMIN_ID]):
-    logger.critical("One or more critical environment variables are missing. Exiting.")
-    sys.exit(1)
+    logger.critical("Critical environment variables are missing. Exiting."); sys.exit(1)
 else:
     ADMIN_ID = int(ADMIN_ID)
 
 try:
     if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        gemini_model = genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction="You are a helpful and friendly assistant.")
         logger.info("Gemini AI client configured.")
-    else:
-        gemini_model = None
-        logger.warning("GEMINI_API_KEY not found. AI commands will be disabled.")
-except Exception as e:
-    gemini_model = None
-    logger.error(f"Failed to configure Gemini API: {e}")
+    else: gemini_model = None; logger.warning("GEMINI_API_KEY not found.")
+except Exception as e: gemini_model = None; logger.error(f"Failed to configure Gemini API: {e}")
 
-# --- Constants & Database Setup ---
-DOWNLOAD_DIR = "downloads"; os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+try:
+    if OPENAI_API_KEY:
+        openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        logger.info("OpenAI client configured for DALL-E 3.")
+    else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
+except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
+
+# --- Database Setup ---
 if DATABASE_URL.startswith("postgres://"): DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 Base = declarative_base()
 class User(Base):
@@ -65,17 +72,15 @@ try: Base.metadata.create_all(engine)
 except OperationalError as e: logger.critical(f"Failed to connect to database: {e}. Exiting."); sys.exit(1)
 Session = sessionmaker(bind=engine)
 
-# --- Helper Functions ---
+# --- User & Notification Functions ---
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
-    user = update.effective_user
-    chat_id = update.effective_chat.id
+    user = update.effective_user; chat_id = update.effective_chat.id
     session = Session()
     try:
         if not session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first():
             new_user = User(user_id=user.id, first_name=user.first_name, username=user.username, chat_id=chat_id)
-            session.add(new_user)
-            session.commit()
+            session.add(new_user); session.commit()
             if user.id != ADMIN_ID: await send_notification_to_admin(context, {'user_id': user.id, 'first_name': user.first_name, 'username': user.username}, "New User Added")
         else:
              if user.id != ADMIN_ID: await send_notification_to_admin(context, {'user_id': user.id, 'first_name': user.first_name, 'username': user.username}, event_type)
@@ -87,198 +92,151 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     first_name = user_info.get('first_name', 'N/A')
     username = f"@{user_info.get('username')}" if user_info.get('username') else "Not set"
     message = (f"Interaction: {event_type}\n" f"User: {first_name} (ID: `{user_info.get('user_id')}`)\n" f"Username: {username}")
-    try: await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+    try: await context.bot.send_message(chat_id=ADMIN_ID, text=escape_markdown(message, version=2), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e: logger.error(f"Failed to send admin notification: {e}")
 
-# --- MAIN MENU & SUB-MENUS ---
+# --- Menu Functions ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [[KeyboardButton("AI Tools"), KeyboardButton("Media Tools")], [KeyboardButton("Utilities"), KeyboardButton("Help")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Main Menu:", reply_markup=reply_markup)
 
 async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("Chat with AI"), KeyboardButton("Create Image")], [KeyboardButton("Animate Image"), KeyboardButton("Upscale Image")], [KeyboardButton("Summarize Link"), KeyboardButton("Summarize File")], [KeyboardButton("Back to Main Menu")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
+    keyboard = [[KeyboardButton("Chat with AI"), KeyboardButton("Create Image")], [KeyboardButton("Read Text from Image"), KeyboardButton("Animate Image")], [KeyboardButton("Upscale Image"), KeyboardButton("Summarize Link")], [KeyboardButton("Summarize File"), KeyboardButton("Back to Main Menu")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True); await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
 
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [[KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")], [KeyboardButton("Back to Main Menu")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True); await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
 async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [[KeyboardButton("Weather"), KeyboardButton("Crypto Prices")], [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")], [KeyboardButton("Back to Main Menu")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Utilities:", reply_markup=reply_markup)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True); await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
-# ✅ NEW: Functions for starting and ending the continuous chat
+# --- Feature Functions ---
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    help_text = ("*Bot Commands Guide:*\n\n- *Chat with AI*: Talk to an AI with conversation memory\.\n- `/readtext`: Reply to an image to read text from it\.\n- *Create Image*: Generate an image from text\.\n- `/animate`: Reply to an image to create a video\.\n- `/upscale`: Reply to an image to improve quality\.\n- And many more in the menu\!")
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+
 async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, event_type="Started AI Chat")
     context.user_data['state'] = 'continuous_chat'
-    context.user_data['gemini_history'] = []  # Initialize empty history for the session
-    chat_keyboard = [[KeyboardButton("End Chat")]]
-    reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "You are now in a continuous chat with the AI. It will remember your conversation.\n\n"
-        "Send your message, or press 'End Chat' to return to the main menu.",
-        reply_markup=reply_markup
-    )
+    context.user_data['gemini_history'] = []
+    chat_keyboard = [[KeyboardButton("End Chat")]]; reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
+    await update.message.reply_text("You are now in a continuous chat with the AI.\n\nSend your message, or press 'End Chat' to return to the main menu.", reply_markup=reply_markup)
 
 async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop('state', None)
-    context.user_data.pop('gemini_history', None)
-    await update.message.reply_text("Chat ended. Returning to the main menu.")
-    await start(update, context)  # Show the main menu again
+    context.user_data.pop('state', None); context.user_data.pop('gemini_history', None)
+    await update.message.reply_text("Chat ended. Returning to the main menu."); await start(update, context)
 
-# --- Command Logic Functions ---
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    help_text = (
-        "**Bot Commands Guide:**\n\n"
-        "- `Chat with AI`: Talk to an AI with conversation memory.\n"
-        "- `Create Image`: Generate an image from text.\n"
-        "- `/animate`: Reply to an image to create a short video.\n"
-        "- `/upscale`: Reply to an image to improve its quality.\n"
-        "- `Summarize Link`: Get a summary of a web article.\n"
-        "- `Summarize File`: Reply to an image or PDF with /summarize_file."
-    )
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-
-# ✅ UPDATED: gemini_command now handles both single commands and continuous chat history
 async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not gemini_model:
-        await update.message.reply_text("AI service is not configured (Missing GEMINI_API_KEY).")
-        return
-
-    # Use chat history if in continuous mode, otherwise start fresh
+    if not gemini_model: await update.message.reply_text("AI service is not configured."); return
     is_continuous_chat = context.user_data.get('state') == 'continuous_chat'
     history = context.user_data.get('gemini_history', []) if is_continuous_chat else []
-    
     prompt = update.message.text if is_continuous_chat else " ".join(context.args)
-    
-    # If called via /gemini with no prompt, but it's not a continuous chat, ask for a prompt.
     if not prompt and not is_continuous_chat:
-        await update.message.reply_text("Please provide a prompt after the command, e.g., `/gemini Who are you?`")
-        return
-
+        await update.message.reply_text("Please provide a prompt after the command, e.g., `/gemini Who are you?`"); return
     image_parts = []
-    # Handle image replies
     if update.message.reply_to_message and update.message.reply_to_message.photo:
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         image_parts.append({"mime_type": "image/jpeg", "data": await photo_file.download_as_bytearray()})
-    
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     try:
         chat_session = gemini_model.start_chat(history=history)
         response = await asyncio.to_thread(chat_session.send_message, [prompt] + image_parts)
-        
-        # If in continuous mode, save the updated history
-        if is_continuous_chat:
-            context.user_data['gemini_history'] = chat_session.history
-        
-        await update.message.reply_text(response.text)
-    except Exception as e:
-        logger.error(f"Gemini API error: {e}")
-        await update.message.reply_text("Sorry, an error occurred with the AI.")
+        if is_continuous_chat: context.user_data['gemini_history'] = chat_session.history
+        escaped_text = escape_markdown(response.text, version=2)
+        await update.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"Gemini chat error: {e}"); await update.message.reply_text("Sorry, an error occurred with the AI.")
 
-async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_translate: str = None) -> None:
-    if not gemini_model: await update.message.reply_text("Translate service is not configured."); return
-    if not text_to_translate:
-        args = context.args
-        if len(args) < 2: await update.message.reply_text("Usage: /translate <language> <text>"); return
-        target_lang, text = args[0], " ".join(args[1:])
-    else:
-        parts = text_to_translate.split(" ", 1)
-        if len(parts) < 2: await update.message.reply_text("Format: language text"); return
-        target_lang, text = parts
-    feedback = await update.message.reply_text(f"Translating to {target_lang}...")
+async def read_text_from_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text("Please reply to an image with the /readtext command."); return
+    await save_user_to_db(update, context, event_type="Used OCR")
+    feedback = await update.message.reply_text("Reading text from image...")
     try:
-        prompt = f"Translate the following text to {target_lang}: {text}"
-        response = await asyncio.to_thread(gemini_model.generate_content, prompt)
-        await feedback.edit_text(response.text)
-    except Exception as e: logger.error(f"Translate API error: {e}"); await feedback.edit_text("Sorry, an error occurred during translation.")
+        photo_file = await update.message.reply_to_message.photo[-1].get_file()
+        image = Image.open(io.BytesIO(await photo_file.download_as_bytearray()))
+        text = await asyncio.to_thread(pytesseract.image_to_string, image)
+        if text and not text.isspace():
+            await feedback.edit_text(f"*Extracted Text:*\n\n{escape_markdown(text, version=2)}", parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            await feedback.edit_text("Couldn't find any readable text in the image.")
+    except Exception as e:
+        logger.error(f"OCR Error: {e}")
+        if "Tesseract is not installed" in str(e):
+             await feedback.edit_text("OCR processing failed. The Tesseract engine is not installed on the server.")
+        else:
+            await feedback.edit_text("Sorry, an error occurred while processing the image.")
 
 async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     if not gemini_model: await update.message.reply_text("AI summarizer is not configured."); return
-    feedback = await update.message.reply_text("Reading article...")
+    feedback = await update.message.reply_text("Analyzing link...")
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        article_text = ' '.join([p.get_text() for p in soup.find_all('p')])
-        if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
-        await feedback.edit_text("Summarizing with AI...")
-        prompt = f"Please provide a concise summary of the following article text:\n\n{article_text[:12000]}"
-        ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt)
-        await feedback.edit_text(f"**Summary:**\n{ai_response.text}", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Summarize error for URL {url}: {e}"); await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
+        headers = {'User-Agent': 'Mozilla/5.0'}; head_response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+        content_type = head_response.headers.get('content-type', '').lower()
+        if 'image' in content_type:
+            await feedback.edit_text("Image link detected. Analyzing image...")
+            image_response = requests.get(url, headers=headers, timeout=20); image_response.raise_for_status()
+            image_part = {"mime_type": content_type, "data": image_response.content}
+            prompt = "You are a visual analyst. Describe this image in great detail."
+            ai_response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image_part])
+            summary = f"*Image Analysis:*\n{ai_response.text}"
+        elif 'text/html' in content_type:
+            await feedback.edit_text("Article link detected. Reading content...")
+            response = requests.get(url, headers=headers, timeout=20); response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            article_text = ' '.join(p.get_text() for p in soup.find_all('p'))
+            if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
+            await feedback.edit_text("Content extracted. Summarizing with AI...")
+            prompt = f"You are an expert analyst. Provide a detailed, structured summary of the following text, using MarkdownV2:\n\n*Key Takeaways:*\n- (3-5 bullet points)\n\n*Detailed Summary:*\n- (A comprehensive paragraph)\n\n*Critical Analysis/Context:*\n- (Deeper insights)\n\n--- TEXT ---\n{article_text[:12000]}"
+            ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt); summary = ai_response.text
+        else: await feedback.edit_text(f"Unsupported link type: '{content_type}'."); return
+        await feedback.edit_text(escape_markdown(summary, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"Summarize error for URL {url}: {e}"); await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
 
 async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not gemini_model: await update.message.reply_text("AI service is not configured."); return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Please reply to an image or a PDF file with /summarize_file."); return
-    replied_message = update.message.reply_to_message
-    feedback_message = await replied_message.reply_text("Processing file...")
+    if not update.message.reply_to_message: await update.message.reply_text("Please reply to an image or a PDF file with /summarize_file."); return
+    replied_message, feedback_message = update.message.reply_to_message, await update.message.reply_to_message.reply_text("Processing file...")
     try:
+        summary = ""
         if replied_message.photo:
             photo_file = await replied_message.photo[-1].get_file()
             image_part = {"mime_type": "image/jpeg", "data": await photo_file.download_as_bytearray()}
-            prompt = "Describe this image in detail."
+            prompt = "You are a visual analyst. Describe this image in great detail."
             response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image_part])
-            summary = response.text
+            summary = f"*Image Analysis:*\n{response.text}"
         elif replied_message.document and replied_message.document.mime_type == 'application/pdf':
             pdf_file = await replied_message.document.get_file()
-            with fitz.open(stream=await pdf_file.download_as_bytearray(), filetype="pdf") as doc: full_text = "".join([page.get_text() for page in doc])
+            with fitz.open(stream=await pdf_file.download_as_bytearray(), filetype="pdf") as doc: full_text = "".join(page.get_text() for page in doc)
             if not full_text.strip(): await feedback_message.edit_text("Could not extract any text from this PDF."); return
-            await feedback_message.edit_text("Extracted text from PDF. Summarizing...")
-            prompt = f"Please provide a detailed summary of the following document text:\n\n{full_text[:12000]}"
-            response = await asyncio.to_thread(gemini_model.generate_content, prompt)
-            summary = response.text
-        else: await feedback_message.edit_text("This command only works when you reply to an image or a PDF file."); return
-        await feedback_message.edit_text(f"**Summary:**\n\n{summary}", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"File summarization error: {e}"); await feedback_message.edit_text("Sorry, an error occurred while processing the file.")
-
-async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
-        if not response['error']:
-            await update.message.reply_text(response['setup']); await asyncio.sleep(2)
-            await update.message.reply_text(response['delivery'])
-    except Exception as e: logger.error(f"Joke API error: {e}"); await update.message.reply_text("Sorry, the joke service is unavailable.")
-
-async def get_crypto_prices(update: Update, context: ContextTypes.DEFAULT_TYPE, crypto_ids: str) -> None:
-    ids = [s.strip().lower() for s in crypto_ids.split(',')]
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(ids)}&vs_currencies=usd,ngn"
-    try:
-        prices = requests.get(url, timeout=5).json()
-        if not prices: await update.message.reply_text("Couldn't find prices."); return
-        message = "**Latest Crypto Prices (from CoinGecko):**\n\n"
-        for coin, data in prices.items(): message += f"**{coin.title()}**\n  - ${data.get('usd', 0):,.2f}\n  - N{data.get('ngn', 0):,.2f}\n\n"
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Crypto API error: {e}"); await update.message.reply_text("Sorry, I couldn't fetch crypto prices.")
-
-async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city: str) -> None:
-    if not OPENWEATHER_API_KEY: await update.message.reply_text("Weather service not configured."); return
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
-    try:
-        data = requests.get(url, timeout=5).json()
-        if data["cod"] != 200: await update.message.reply_text(f"Sorry, couldn't find city '{city}'."); return
-        message = f"**Weather in {data['name']}**\n- Condition: {data['weather'][0]['description'].title()}\n- Temperature: {data['main']['temp']}°C"
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Weather API error: {e}"); await update.message.reply_text("Sorry, I couldn't fetch the weather.")
+            await feedback_message.edit_text("Extracted text. Summarizing...")
+            prompt = f"You are an expert analyst. Provide a detailed, structured summary of the following document, using MarkdownV2:\n\n*Key Takeaways:*\n- (3-5 bullet points)\n\n*Detailed Summary:*\n- (A comprehensive paragraph)\n\n*Critical Analysis/Context:*\n- (Deeper insights)\n\n--- DOCUMENT ---\n{full_text[:12000]}"
+            response = await asyncio.to_thread(gemini_model.generate_content, prompt); summary = response.text
+        else: await feedback_message.edit_text("This command only works on an image or PDF file."); return
+        await feedback_message.edit_text(escape_markdown(summary, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"File summarization error: {e}"); await feedback_message.edit_text("Sorry, an error occurred.")
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
-    if not STABILITY_API_KEY: await update.message.reply_text("Image generation service not configured."); return
-    feedback = await update.message.reply_text("Creating your image...")
-    try:
-        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
-        headers = {"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}
-        payload = {"text_prompts": [{"text": prompt}]}
-        response = requests.post(url, headers=headers, json=payload, timeout=90)
-        response.raise_for_status()
-        image_b64 = response.json()["artifacts"][0]["base64"]
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(image_b64), caption=f"Creation: `{prompt}`", parse_mode=ParseMode.MARKDOWN)
-        await feedback.delete()
-    except Exception as e: logger.error(f"Stability AI error: {e}"); await feedback.edit_text("Sorry, I couldn't create the image.")
+    if not openai_client and not STABILITY_API_KEY: await update.message.reply_text("No image generation services are configured."); return
+    feedback = await update.message.reply_text("Accessing image generation services...")
+    if openai_client:
+        try:
+            await feedback.edit_text("Attempting to create image with DALL-E 3...")
+            response = await openai_client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024", quality="standard")
+            await context.bot.send_photo(update.effective_chat.id, photo=response.data[0].url, caption=f"Created with DALL-E 3: `{escape_markdown(prompt, version=2)}`", parse_mode=ParseMode.MARKDOWN_V2)
+            await feedback.delete(); return
+        except Exception as e: logger.error(f"DALL-E 3 API error: {e}"); await feedback.edit_text("DALL-E 3 failed. Trying backup service..."); await asyncio.sleep(2)
+    if STABILITY_API_KEY:
+        try:
+            await feedback.edit_text("Attempting to create image with Stability AI...")
+            response = requests.post("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image", headers={"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}, json={"text_prompts": [{"text": prompt}]}, timeout=90)
+            response.raise_for_status()
+            await context.bot.send_photo(update.effective_chat.id, photo=base64.b64decode(response.json()["artifacts"][0]["base64"]), caption=f"Created with Stability AI: `{escape_markdown(prompt, version=2)}`", parse_mode=ParseMode.MARKDOWN_V2)
+            await feedback.delete(); return
+        except Exception as e: logger.error(f"Stability AI error: {e}"); await feedback.edit_text("Sorry, the backup image service also failed."); return
+    await feedback.edit_text("Sorry, I couldn't create the image with any available service.")
 
 async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not CLIPDROP_API_KEY: await update.message.reply_text("Image upscaling service not configured."); return
@@ -288,7 +246,7 @@ async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TY
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         response = requests.post('https://clipdrop-api.co/image-upscaling/v1/upscale', files={'image_file': await photo_file.download_as_bytearray()}, headers={'x-api-key': CLIPDROP_API_KEY}, timeout=90)
         response.raise_for_status()
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=response.content, filename='upscaled.png', caption='Here is your upscaled image!')
+        await context.bot.send_document(update.effective_chat.id, response.content, filename='upscaled.png', caption='Here is your upscaled image!')
         await feedback.delete()
     except Exception as e: logger.error(f"ClipDrop API Error: {e}"); await feedback.edit_text("Sorry, an error occurred while upscaling.")
 
@@ -298,165 +256,187 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     feedback = await update.message.reply_text("Sending image to animation engine...")
     try:
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
-        response = requests.post("https://api.stability.ai/v2beta/image-to-video", headers={"authorization": f"Bearer {STABILITY_API_KEY}"}, files={"image": await photo_file.download_as_bytearray()}, data={"motion_bucket_id": 40}, timeout=30)
-        response.raise_for_status()
-        generation_id = response.json()["id"]
+        api_url = "https://api.stability.ai/v2beta/image-to-video"
+        response = requests.post(api_url, headers={"authorization": f"Bearer {STABILITY_API_KEY}"}, files={"image": await photo_file.download_as_bytearray()}, data={"motion_bucket_id": 40}, timeout=30)
+        response.raise_for_status(); generation_id = response.json()["id"]
         await feedback.edit_text("Animation started. This may take a minute...")
+        result_url = f"{api_url}/result/{generation_id}"
         for _ in range(45):
             await asyncio.sleep(4)
-            res = requests.get(f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}", headers={'authorization': f"Bearer {STABILITY_API_KEY}", 'accept': "video/mp4"}, timeout=20)
+            res = requests.get(result_url, headers={'authorization': f"Bearer {STABILITY_API_KEY}", 'accept': "video/mp4"}, timeout=20)
             if res.status_code == 200:
-                await context.bot.send_video(chat_id=update.effective_chat.id, video=res.content, caption="Here is your animated video!")
-                await feedback.delete(); return
-            elif res.status_code != 202: break
-        await feedback.edit_text("Sorry, the animation timed out.")
-    except Exception as e: logger.error(f"Animate command error: {e}"); await feedback.edit_text("Sorry, an error occurred while creating the animation.")
+                await context.bot.send_video(update.effective_chat.id, res.content, caption="Here is your animated video!"); await feedback.delete(); return
+            elif res.status_code != 202: logger.error(f"Animation failed with status {res.status_code}: {res.text}"); break
+        await feedback.edit_text("Sorry, the animation timed out or failed.")
+    except Exception as e: logger.error(f"Animate command error: {e}"); await feedback.edit_text(f"Sorry, an error occurred: {e}")
 
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
     feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
     try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1', 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(song_name, download=False)
         if not info.get('entries'): await feedback.edit_text("Sorry, couldn't find any results."); return
-        video_info = info['entries'][0]; title = video_info.get('title', 'Unknown Title'); video_id = video_info.get('id')
-        keyboard = [[InlineKeyboardButton("Download Audio", callback_data=f"play_audio:{video_id}"), InlineKeyboardButton("Download Video", callback_data=f"play_video:{video_id}")], [InlineKeyboardButton("Cancel", callback_data="play_cancel")]]
-        await feedback.edit_text(f"I found: '{title}'.\n\nChoose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e: logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be blocking requests. Ensure `cookies_youtube.txt` is valid.")
+        video = info['entries'][0]
+        keyboard = [[InlineKeyboardButton("Audio", callback_data=f"play_audio:{video['id']}"), InlineKeyboardButton("Video", callback_data=f"select_quality:{video['id']}")], [InlineKeyboardButton("Cancel", callback_data="play_cancel")]]
+        await feedback.edit_text(f"Found: '{escape_markdown(video['title'], version=2)}'.\n\nChoose a format:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"Play search error: {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be blocking your server. Please make sure `cookies_youtube.txt` is present and valid.")
 
-async def handle_play_audio_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def show_quality_options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
-    await query.edit_message_text("Downloading audio...")
+    await query.edit_message_text("Checking available video qualities...")
     try:
-        audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
-        audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-        await query.edit_message_text("Sending audio...")
-        with open(audio_path, 'rb') as audio_file: await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
-        await query.delete_message()
-    except Exception as e: logger.error(f"Play audio download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading.")
-    finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        ydl_opts = {'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(video_id, download=False)
+        formats = info.get('formats', []); quality_buttons = []; supported_heights = [1080, 720, 480, 360]; found_heights = set()
+        for f in reversed(formats):
+            if f.get('height') in supported_heights and f['height'] not in found_heights and f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
+                height = f['height']; filesize_mb = f.get('filesize') or f.get('filesize_approx')
+                size_str = f"({filesize_mb / (1024*1024):.1f} MB)" if filesize_mb else ""
+                quality_buttons.append([InlineKeyboardButton(f"{height}p {size_str}", callback_data=f"play_video:{video_id}:{f['format_id']}")]); found_heights.add(height)
+        if not quality_buttons: await query.edit_message_text("Couldn't find any suitable pre-merged MP4 formats to download."); return
+        quality_buttons.append([InlineKeyboardButton("Cancel", callback_data="play_cancel")])
+        await query.edit_message_text("Please select a video quality to download:", reply_markup=InlineKeyboardMarkup(quality_buttons))
+    except Exception as e: logger.error(f"Error fetching video qualities: {e}"); await query.edit_message_text("Sorry, an error occurred while checking video qualities.")
 
-async def handle_play_video_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
     query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]
+    data_parts = query.data.split(":"); video_id = data_parts[1]; format_id = data_parts[2] if len(data_parts) > 2 else None
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
-    await query.edit_message_text("Downloading video...")
+    await query.edit_message_text(f"Downloading {media_type}...")
     try:
-        video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([video_id])
-        video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-        await query.edit_message_text("Sending video...")
-        with open(video_path, 'rb') as video_file: await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
+        opts = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
+        if media_type == 'audio': opts.update({'format': 'bestaudio/best', 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]})
+        else:
+            if not format_id: raise ValueError("Video format ID is missing.")
+            opts['format'] = format_id
+        with yt_dlp.YoutubeDL(opts) as ydl: info = ydl.extract_info(video_id, download=True)
+        file_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        await query.edit_message_text(f"Sending {media_type}...")
+        with open(file_path, 'rb') as file:
+            if media_type == 'audio':
+                artist = info.get('artist') or info.get('uploader', 'Unknown Artist'); title = info.get('title', 'Unknown Title')
+                safe_artist = ''.join(c for c in artist if c.isalnum() or c in ' -_')[:20]; safe_title = ''.join(c for c in title if c.isalnum() or c in ' -_')[:20]
+                keyboard = [[InlineKeyboardButton("Get Lyrics", callback_data=f"get_lyrics:{safe_artist}|{safe_title}")]]; reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_audio(query.message.chat_id, file, title=info.get('title'), duration=info.get('duration'), reply_markup=reply_markup)
+            else: await context.bot.send_video(query.message.chat_id, file, supports_streaming=True)
         await query.delete_message()
-    except Exception as e: logger.error(f"Play video download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading.")
+    except Exception as e: logger.error(f"Download error for {video_id}: {e}"); await query.edit_message_text("An error occurred during download. The video might be too large or the format is invalid.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer(); await query.edit_message_text("Search cancelled.")
 
-async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str, content_url: str) -> None:
-    # This function is complete
-    pass
+async def get_lyrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query; await query.answer()
+    try: _, data = query.data.split(':', 1); artist, title = data.split('|', 1)
+    except (ValueError, IndexError): await query.message.reply_text("Could not get song info from the button."); return
+    await query.edit_message_reply_markup(None)
+    feedback = await query.message.reply_text(f"Searching for lyrics for '{title}' by '{artist}'...")
+    try:
+        url = f"https://api.lyrics.ovh/v1/{artist}/{title}"; response = requests.get(url, timeout=10)
+        if response.status_code == 200 and response.json().get("lyrics"):
+            lyrics = response.json()["lyrics"]
+            if len(lyrics) > 4000: await feedback.edit_text(f"*Lyrics for {title} by {artist}:*\n\n{escape_markdown(lyrics[:4000], version=2)}\n\n(Lyrics truncated)", parse_mode=ParseMode.MARKDOWN_V2)
+            else: await feedback.edit_text(f"*Lyrics for {title} by {artist}:*\n\n{escape_markdown(lyrics, version=2)}", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+    except Exception as e: logger.warning(f"Lyrics.ovh API failed: {e}. Trying Gemini fallback.")
+    if gemini_model:
+        try:
+            await feedback.edit_text("Primary search failed. Asking Gemini for the lyrics...")
+            prompt = f"Please find the full lyrics for the song '{title}' by '{artist}'. If you find them, present them clearly. If you cannot find them, just say 'Sorry, I could not find the lyrics for this song.'"
+            response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+            await feedback.edit_text(escape_markdown(response.text, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        except Exception as e: logger.error(f"Gemini lyrics fallback failed: {e}")
+    await feedback.edit_text("Sorry, I couldn't find the lyrics for this song using any available method.")
 
-async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # This function is complete
-    pass
+async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
+        if not response['error']: await update.message.reply_text(f"{response['setup']}\n\n...{response['delivery']}")
+    except Exception as e: logger.error(f"Joke API error: {e}"); await update.message.reply_text("Sorry, couldn't get a joke.")
 
-async def handle_download_platform_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # This function is complete
-    pass
+async def get_crypto_prices(update: Update, context: ContextTypes.DEFAULT_TYPE, crypto_ids: str) -> None:
+    ids = ','.join(s.strip().lower() for s in crypto_ids.split(','))
+    try:
+        prices = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd,ngn", timeout=5).json()
+        if not prices: await update.message.reply_text("Couldn't find prices."); return
+        message = "*Latest Crypto Prices:*\n" + "\n".join(f"• *{c.title()}*: ${d.get('usd', 0):,.2f} / ₦{d.get('ngn', 0):,.2f}" for c, d in prices.items())
+        await update.message.reply_text(escape_markdown(message, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"Crypto API error: {e}"); await update.message.reply_text("Sorry, couldn't fetch crypto prices.")
 
+async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city: str) -> None:
+    if not OPENWEATHER_API_KEY: await update.message.reply_text("Weather service not configured."); return
+    try:
+        data = requests.get(f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric", timeout=5).json()
+        if data["cod"] != 200: await update.message.reply_text(f"Sorry, couldn't find city '{city}'."); return
+        message = f"*Weather in {data['name']}*: {data['weather'][0]['description'].title()} at {data['main']['temp']}°C"
+        await update.message.reply_text(escape_markdown(message, version=2), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e: logger.error(f"Weather API error: {e}"); await update.message.reply_text("Sorry, couldn't fetch the weather.")
+
+# --- Message Routing ---
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
-    await save_user_to_db(update, context, event_type=event)
-    context.user_data['state'] = state
-    await update.message.reply_text(message)
+    await save_user_to_db(update, context, event_type=event); context.user_data['state'] = state; await update.message.reply_text(message)
 
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ✅ UPDATED: Main routing logic for continuous chat
     if not update.message or not update.message.text: return
-    
-    # Check for continuous chat state first, and DO NOT pop it.
-    if context.user_data.get('state') == 'continuous_chat':
-        await gemini_command(update, context)
-        return
-
-    # For all other states, pop the state after one use.
+    state = context.user_data.get('state')
+    if state == 'continuous_chat': await gemini_command(update, context); return
     state = context.user_data.pop('state', None)
-    if not state:
-        await save_user_to_db(update, context, "Sent a message")
-        return
-
+    if not state: await save_user_to_db(update, context, "Sent a message"); return
+    
     text = update.message.text
-    if state == 'awaiting_song_name':
-        await search_and_play_song(update, context, text)
-    elif state == 'awaiting_imagine_prompt':
-        await generate_image(update, context, text)
-    elif state == 'awaiting_city':
-        await get_weather(update, context, text)
-    elif state == 'awaiting_crypto_symbols':
-        await get_crypto_prices(update, context, text)
-    elif state == 'awaiting_summary_url':
-        await summarize_url(update, context, text)
-    elif state == 'awaiting_translation_text':
-        await translate_command(update, context, text)
-    # (Add other states like 'awaiting_url' for the generic downloader if needed)
+    state_handlers = {
+        'awaiting_song_name': lambda: search_and_play_song(update, context, song_name=text),
+        'awaiting_imagine_prompt': lambda: generate_image(update, context, prompt=text),
+        'awaiting_city': lambda: get_weather(update, context, city=text),
+        'awaiting_crypto_symbols': lambda: get_crypto_prices(update, context, crypto_ids=text),
+        'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
+        'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
+    }
+    if state in state_handlers: await state_handlers[state]()
 
+# --- Main Application Setup ---
 def main() -> None:
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
     
-    # Command Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("upscale", upscale_image_command))
-    application.add_handler(CommandHandler("animate", animate_command))
-    application.add_handler(CommandHandler("translate", translate_command))
-    application.add_handler(CommandHandler("summarize_file", summarize_file_command))
-    application.add_handler(CommandHandler("gemini", gemini_command))
-
-    # Menu Handlers
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^AI Tools$"), show_ai_tools_menu))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Media Tools$"), show_media_tools_menu))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Utilities$"), show_utilities_menu))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Back to Main Menu$"), start))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), help_command))
-
-    # ✅ NEW: Handlers for starting and ending the continuous chat
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Chat with AI$"), start_ai_chat))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^End Chat$"), end_chat))
+    cmd_handlers = [CommandHandler(cmd, func) for cmd, func in [
+        ("start", start), ("help", help_command), ("upscale", upscale_image_command),
+        ("animate", animate_command), ("summarize_file", summarize_file_command),
+        ("gemini", gemini_command), ("readtext", read_text_from_image_command)
+    ]]
+    msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in [
+        ("AI Tools", show_ai_tools_menu), ("Media Tools", show_media_tools_menu),
+        ("Utilities", show_utilities_menu), ("Back to Main Menu", start),
+        ("Help", help_command), ("Chat with AI", start_ai_chat), ("End Chat", end_chat),
+        ("Read Text from Image", lambda u,c: u.message.reply_text("Please reply to an image with /readtext to extract text from it.")),
+        ("Play Music / Video", lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video?","Pressed 'Play'")),
+        ("Create Image", lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")),
+        ("Weather", lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")),
+        ("Crypto Prices", lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs (e.g., bitcoin).","Pressed 'Crypto'")),
+        ("Tell a Joke", get_joke),
+        ("Summarize Link", lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Send the article or image link.","Pressed 'Summarize'")),
+        ("Translate Text", lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Format: language text (e.g., Spanish Hello)","Pressed 'Translate'")),
+        ("Animate Image", lambda u,c: u.message.reply_text("Reply to an image with /animate.")),
+        ("Upscale Image", lambda u,c: u.message.reply_text("Reply to an image with /upscale.")),
+        ("Summarize File", lambda u,c: u.message.reply_text("Reply to an image or PDF with /summarize_file."))
+    ]]
+    callback_handlers = [
+        CallbackQueryHandler(lambda u,c: handle_play_confirmation(u,c,'audio'), pattern="^play_audio:"),
+        CallbackQueryHandler(lambda u,c: handle_play_confirmation(u,c,'video'), pattern="^play_video:"),
+        CallbackQueryHandler(show_quality_options_callback, pattern="^select_quality:"),
+        CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"),
+        CallbackQueryHandler(get_lyrics_callback, pattern="^get_lyrics:")
+    ]
+    application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message), group=1)
     
-    # Sub-Menu Button Handlers that prompt for input
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music / Video$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song?","Pressed 'Play'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Media$"), lambda u,c: prompt_for_input(u,c,'awaiting_url', "Send the link to download.","Pressed 'Download'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Create Image$"), lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Animate Image$"), lambda u,c: u.message.reply_text("Reply to an image with /animate.")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Upscale Image$"), lambda u,c: u.message.reply_text("Reply to an image with /upscale.")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Weather$"), lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Crypto Prices$"), lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs from CoinGecko (e.g., bitcoin).","Pressed 'Crypto'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Tell a Joke$"), get_joke))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize Link$"), lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Send the article link.","Pressed 'Summarize'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize File$"), lambda u,c: u.message.reply_text("Reply to an image or PDF with /summarize_file.")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Translate Text$"), lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Format: language text (e.g., Spanish Hello)","Pressed 'Translate'")))
-
-    # Callback Query Handlers
-    application.add_handler(CallbackQueryHandler(handle_play_audio_confirmation, pattern="^play_audio:"))
-    application.add_handler(CallbackQueryHandler(handle_play_video_confirmation, pattern="^play_video:"))
-    application.add_handler(CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"))
-
-    # General message handler (must be last)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
-    
-    # Webhook setup
     PORT = int(os.environ.get("PORT", 8443))
     RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
-    if not RENDER_APP_NAME:
-        application.run_polling()
-    else:
-        WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
-        application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=WEBHOOK_URL)
+    if not RENDER_APP_NAME: application.run_polling()
+    else: application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}")
 
 if __name__ == "__main__":
     main()
