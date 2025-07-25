@@ -52,7 +52,6 @@ except Exception: gemini_model = None
 
 # --- Constants ---
 DOWNLOAD_DIR = "downloads"; os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-TELEGRAM_VIDEO_LIMIT_BYTES = 50 * 1024 * 1024
 
 # --- Database Setup ---
 if DATABASE_URL.startswith("postgres://"): DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -66,7 +65,7 @@ try: Base.metadata.create_all(engine)
 except OperationalError as e: logger.critical(f"Failed to connect to database: {e}. Exiting."); sys.exit(1)
 Session = sessionmaker(bind=engine)
 
-# --- Helper, Notification & DB Functions ---
+# --- Helper Functions ---
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
     user = update.effective_user
@@ -76,7 +75,6 @@ async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, ev
 
 # --- MAIN MENU & SUB-MENUS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(f"Handling /start command or 'Back' button for user {update.effective_user.id}")
     keyboard = [
         [KeyboardButton("AI Tools"), KeyboardButton("Media Tools")],
         [KeyboardButton("Utilities"), KeyboardButton("Help")]
@@ -279,9 +277,9 @@ async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         with yt_dlp.YoutubeDL(audio_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+            info = ydl.extract_info(f"http://www.youtube.com/watch?v={video_id}", download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-        await query.edit_message_text("Sending audio...")
+        await query.edit_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=query.effective_chat.id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
@@ -397,10 +395,8 @@ def main() -> None:
         application.run_polling()
     else:
         WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
-        # FIX FOR RENDER HEALTH CHECKS: Set a health check endpoint.
-        application.add_handler(MessageHandler(filters.Regex("^/health$"), lambda u,c: c.bot.send_message(u.effective_chat.id, "OK")))
         logger.info(f"Starting bot in webhook mode on port {PORT}")
-        application.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL, health_check_path="/health")
+        application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=WEBHOOK_URL)
 
 if __name__ == "__main__":
     main()
