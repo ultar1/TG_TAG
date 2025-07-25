@@ -69,19 +69,26 @@ try:
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel('gemini-1.5-flash')
         logger.info("Gemini AI client configured.")
-    else: gemini_model = None; logger.warning("GEMINI_API_KEY not found.")
-except Exception as e: gemini_model = None; logger.error(f"Failed to configure Gemini API: {e}")
+    else:
+        gemini_model = None
+        logger.warning("GEMINI_API_KEY not found. AI commands will be disabled.")
+except Exception as e:
+    gemini_model = None
+    logger.error(f"Failed to configure Gemini API: {e}")
 
 try:
     if OPENAI_API_KEY:
         openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
         logger.info("OpenAI client configured for DALL-E.")
-    else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
-except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
+    else:
+        openai_client = None
+        logger.warning("OPENAI_API_KEY not found. Image creation will be disabled.")
+except Exception as e:
+    openai_client = None
+    logger.error(f"Failed to configure OpenAI API: {e}")
 
 
 # --- Constants & Database Setup ---
-# ... (Database setup remains the same)
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 if DATABASE_URL.startswith("postgres://"):
@@ -104,7 +111,6 @@ except OperationalError as e:
 Session = sessionmaker(bind=engine)
 
 # --- User & Notification Functions ---
-# ... (save_user_to_db and send_notification_to_admin remain the same)
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
     user, chat_id = update.effective_user, update.effective_chat.id
@@ -127,7 +133,6 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
     except Exception as e: logger.error(f"Failed to send admin notification: {e}")
 
 # --- Menu Functions ---
-# ... (start, show_ai_tools_menu, show_media_tools_menu remain the same)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [[KeyboardButton("AI Tools"), KeyboardButton("Media Tools")], [KeyboardButton("Utilities"), KeyboardButton("Help")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -149,25 +154,19 @@ async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
 async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Base keyboard for all users
     keyboard = [
         [KeyboardButton("Weather"), KeyboardButton("Crypto Prices")],
         [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
         [KeyboardButton("Ask a Riddle"), KeyboardButton("Take Screenshot")]
     ]
-    # Add admin-only button if the user is the admin
     if update.effective_user.id == ADMIN_ID:
         keyboard.append([KeyboardButton("Send Email (Admin)")])
-    
     keyboard.append([KeyboardButton("Convert Video to Audio")])
     keyboard.append([KeyboardButton("Back to Main Menu")])
-
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
-
 # --- Feature Functions ---
-# ... (help_command, start_ai_chat, end_chat, gemini_command remain the same)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "**Bot Commands Guide:**\n\n"
@@ -185,22 +184,61 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-# --- REWRITTEN GMAIL COMMAND ---
+async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await save_user_to_db(update, context, event_type="Started AI Chat")
+    context.user_data['state'] = 'continuous_chat'
+    context.user_data['gemini_history'] = []
+    chat_keyboard = [[KeyboardButton("End Chat")]]
+    reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
+    await update.message.reply_text("You are now in a continuous chat with the AI.\n\nSend your message, or press 'End Chat' to return to the main menu.", reply_markup=reply_markup)
+
+async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop('state', None)
+    context.user_data.pop('gemini_history', None)
+    await update.message.reply_text("Chat ended. Returning to the main menu.")
+    await start(update, context)
+
+# --- THIS FUNCTION WAS MISSING ---
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
+    if not gemini_model:
+        await update.message.reply_text("AI service is not configured.")
+        return
+
+    is_continuous_chat = context.user_data.get('state') == 'continuous_chat'
+    history = context.user_data.get('gemini_history', []) if is_continuous_chat else []
+
+    if not prompt_text:
+        prompt_text = " ".join(context.args) if not is_continuous_chat else update.message.text
+    
+    if not prompt_text:
+        await update.message.reply_text("Please provide a prompt.")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    
+    try:
+        chat_session = gemini_model.start_chat(history=history)
+        response = await asyncio.to_thread(chat_session.send_message, prompt_text)
+        
+        if is_continuous_chat:
+            context.user_data['gemini_history'] = chat_session.history
+        
+        safe_reply = escape_markdown(response.text, version=2)
+        await update.message.reply_text(safe_reply, parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logger.error(f"Gemini command error: {e}")
+        await update.message.reply_text("Sorry, an error occurred with the AI. The response may contain formatting I can't send.")
+
 async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Starts the step-by-step process of sending an email."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Sorry, this command is for the admin only.")
         return
-
-    # Check if credentials are set up before starting
     if not os.environ.get("GMAIL_ADDRESS") or not os.environ.get("GMAIL_APP_PASSWORD"):
         await update.message.reply_text("The email service is not configured on the server.")
         return
-        
     context.user_data['state'] = 'awaiting_email_address'
     await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.")
 
-# ... (All other functions from screenshot_command to the end remain the same)
 async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None) -> None:
     if not SCREENSHOT_API_KEY:
         await update.message.reply_text("Screenshot service is not configured.")
@@ -230,7 +268,6 @@ async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.error(f"Screenshot command failed: {e}")
         await feedback.edit_text("An unexpected error occurred.")
 
-# ... [ All other functions like read_text, summarize, create_image, etc go here ]
 async def read_text_from_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
         await update.message.reply_text("Please reply to an image with /readtext or use the menu button.")
@@ -534,12 +571,10 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message or not update.message.text: return
     state = context.user_data.get('state')
     
-    # Handle continuous AI chat
     if state == 'continuous_chat': 
         await gemini_command(update, context)
         return
 
-    # Handle step-by-step Gmail process
     if state == 'awaiting_email_address':
         context.user_data['email_to'] = update.message.text
         context.user_data['state'] = 'awaiting_email_subject'
@@ -553,34 +588,24 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
         
     if state == 'awaiting_email_body':
-        to_address = context.user_data.pop('email_to')
-        subject = context.user_data.pop('email_subject')
-        body = update.message.text
-        context.user_data.pop('state', None) # Clean up state
-
+        to_address, subject, body = context.user_data.pop('email_to'), context.user_data.pop('email_subject'), update.message.text
+        context.user_data.pop('state', None)
         feedback = await update.message.reply_text(f"Sending email to {to_address}...")
-        msg = EmailMessage()
-        msg.set_content(body); msg['Subject'] = subject; msg['From'] = os.environ.get("GMAIL_ADDRESS"); msg['To'] = to_address
+        msg = EmailMessage(); msg.set_content(body); msg['Subject'] = subject; msg['From'] = os.environ.get("GMAIL_ADDRESS"); msg['To'] = to_address
         def send_email_sync():
             try:
                 with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
                     s.login(os.environ.get("GMAIL_ADDRESS"), os.environ.get("GMAIL_APP_PASSWORD"))
                     s.send_message(msg)
                 return True
-            except Exception as e:
-                logger.error(f"Failed to send email: {e}")
-                return False
+            except Exception as e: logger.error(f"Failed to send email: {e}"); return False
         success = await asyncio.to_thread(send_email_sync)
         if success: await feedback.edit_text("Email sent successfully!")
         else: await feedback.edit_text("Failed to send email. Check server logs.")
         return
 
-    # Handle other states
     state = context.user_data.pop('state', None)
-    if not state: 
-        await save_user_to_db(update, context, "Sent a message")
-        return
-        
+    if not state: await save_user_to_db(update, context, "Sent a message"); return
     text = update.message.text
     state_handlers = {
         'awaiting_gemini_prompt': lambda: gemini_command(update, context, prompt_text=text),
