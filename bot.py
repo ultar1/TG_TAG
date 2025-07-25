@@ -12,13 +12,14 @@ import json
 from bs4 import BeautifulSoup
 import base64
 import openai
+import fitz  # PyMuPDF
 
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import OperationalError, IntegrityError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.types import BigInteger
 import yt_dlp
 
@@ -31,7 +32,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-3.5-turbo").strip()
+GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-4o").strip() # Using gpt-4o for image analysis
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
@@ -85,7 +86,8 @@ async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = [
         [KeyboardButton("Chat with AI"), KeyboardButton("Create Image")],
         [KeyboardButton("Animate Image"), KeyboardButton("Upscale Image")],
-        [KeyboardButton("Summarize Link"), KeyboardButton("Back to Main Menu")]
+        [KeyboardButton("Summarize Link"), KeyboardButton("Summarize File")],
+        [KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
@@ -110,17 +112,19 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Command Logic ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
-        "**Here's how to use the bot:**\n\n"
-        "**Play Music / Video**: Searches YouTube for a song or video.\n"
-        "**Download Media**: Downloads video/audio from sites like TikTok, etc.\n"
-        "**Chat with AI**: Talk to an AI for questions.\n"
-        "**Create Image**: Generate an image from a text description.\n"
-        "**Animate Image**: Reply to an image with /animate to create a short video.\n"
-        "**Upscale Image**: Reply to an image with /upscale to improve its quality.\n"
-        "**Weather**: Get the current weather for any city.\n"
-        "**Crypto Prices**: Check the latest prices of cryptocurrencies.\n"
-        "**Summarize Link**: Get a summary of a web article.\n"
-        "**Tell a Joke**: Get a random joke."
+        "**Bot Commands Guide:**\n\n"
+        "**AI Tools**\n"
+        "- `Chat with AI`: Talk to an AI.\n"
+        "- `Create Image`: Generate an image from text.\n"
+        "- `Animate Image`: Reply to an image with `/animate` to create a short video.\n"
+        "- `Upscale Image`: Reply to an image with `/upscale` to improve its quality.\n"
+        "- `Summarize Link`: Get a summary of a web article.\n"
+        "- `Summarize File`: Reply to an image or PDF with `/summarize_file`.\n\n"
+        "**Media Tools**\n"
+        "- `Play Music / Video`: Searches YouTube for a song or video.\n"
+        "- `Download Media`: Downloads video/audio from sites like TikTok, etc.\n\n"
+        "**Utilities**\n"
+        "- `Weather`, `Crypto Prices`, `Translate Text`, `Tell a Joke`."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -164,11 +168,57 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         article_text = ' '.join([p.get_text() for p in soup.find_all('p')])
         if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
         await feedback.edit_text("Summarizing with AI...")
-        prompt = f"Please provide a concise summary of the following article text:\n\n{article_text[:8000]}"
+        prompt = f"Please provide a concise summary of the following article text:\n\n{article_text[:12000]}"
         ai_response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt}])
         await feedback.edit_text(f"**Summary:**\n{ai_response.choices[0].message.content}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Summarize error for URL {url}: {e}"); await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
+
+async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not openai_client: await update.message.reply_text("AI service is not configured (Missing OPENAI_API_KEY)."); return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to an image or a PDF file with /summarize_file."); return
+
+    replied_message = update.message.reply_to_message
+    feedback_message = await replied_message.reply_text("Processing file...")
+
+    try:
+        if replied_message.photo:
+            photo_file = await replied_message.photo[-1].get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            base64_image = base64.b64encode(photo_bytes).decode('utf-8')
+
+            response = await asyncio.to_thread(
+                openai_client.chat.completions.create,
+                model="gpt-4o",
+                messages=[{"role": "user", "content": [{"type": "text", "text": "Describe this image in detail."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
+                max_tokens=500
+            )
+            summary = response.choices[0].message.content
+
+        elif replied_message.document and replied_message.document.mime_type == 'application/pdf':
+            pdf_file = await replied_message.document.get_file()
+            pdf_bytes = await pdf_file.download_as_bytearray()
+            
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            full_text = "".join([page.get_text() for page in doc])
+            doc.close()
+
+            if not full_text.strip(): await feedback_message.edit_text("Could not extract any text from this PDF."); return
+
+            await feedback_message.edit_text("Extracted text from PDF. Summarizing...")
+            prompt = f"Please provide a detailed summary of the following document text:\n\n{full_text[:12000]}"
+            response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt}])
+            summary = response.choices[0].message.content
+        
+        else:
+            await feedback_message.edit_text("This command only works when you reply to an image or a PDF file."); return
+
+        await feedback_message.edit_text(f"**Summary:**\n\n{summary}", parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"File summarization error: {e}")
+        await feedback_message.edit_text("Sorry, an error occurred while processing the file.")
 
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -207,10 +257,9 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     if not STABILITY_API_KEY: await update.message.reply_text("Image generation service not configured. (Missing STABILITY_API_KEY)."); return
     feedback = await update.message.reply_text("Creating your image...")
     try:
-        # UPDATED MODEL ID
         url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
         headers = {"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}
-        payload = {"text_prompts": [{"text": prompt}], "samples": 1, "width": 1024, "height": 1024}
+        payload = {"text_prompts": [{"text": prompt}]}
         response = requests.post(url, headers=headers, json=payload, timeout=90)
         response.raise_for_status()
         image_b64 = response.json()["artifacts"][0]["base64"]
@@ -255,25 +304,18 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Animate command error: {e}"); await feedback.edit_text("Sorry, an error occurred while creating the animation.")
 
-# --- PLAY MUSIC / VIDEO FLOW ---
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
     feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
     try:
-        with yt_dlp.YoutubeDL({'noplaylist': True, 'quiet': True}) as ydl: info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+        ydl_opts = {'noplaylist': True, 'quiet': True}
+        if os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
         if not info.get('entries'): await feedback.edit_text("Sorry, couldn't find any results."); return
         video_info = info['entries'][0]; title = video_info.get('title', 'Unknown Title'); video_id = video_info.get('id')
-        
-        # NEW: Buttons for both Audio and Video
-        keyboard = [
-            [
-                InlineKeyboardButton("Download Audio", callback_data=f"play_audio:{video_id}"),
-                InlineKeyboardButton("Download Video", callback_data=f"play_video:{video_id}")
-            ],
-            [InlineKeyboardButton("Cancel", callback_data="play_cancel")]
-        ]
+        keyboard = [[InlineKeyboardButton("Download Audio", callback_data=f"play_audio:{video_id}"), InlineKeyboardButton("Download Video", callback_data=f"play_video:{video_id}")], [InlineKeyboardButton("Cancel", callback_data="play_cancel")]]
         await feedback.edit_text(f"I found: '{title}'.\n\nChoose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be rate-limiting.")
+        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be blocking requests. Ensure `cookies_youtube.txt` is valid.")
 
 async def handle_play_audio_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
@@ -384,6 +426,7 @@ def main() -> None:
     application.add_handler(CommandHandler("upscale", upscale_image_command))
     application.add_handler(CommandHandler("animate", animate_command))
     application.add_handler(CommandHandler("translate", translate_command))
+    application.add_handler(CommandHandler("summarize_file", summarize_file_command))
 
     # Main Menu Handlers
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^AI Tools$"), show_ai_tools_menu))
@@ -402,6 +445,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Crypto Prices$"), lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs from CoinGecko (e.g., bitcoin).","Pressed 'Crypto'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Tell a Joke$"), get_joke))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize Link$"), lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Send the article link.","Pressed 'Summarize'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize File$"), lambda u,c: u.message.reply_text("Reply to an image or PDF with /summarize_file.")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), help_command))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Translate Text$"), lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Format: language text (e.g., Spanish Hello)","Pressed 'Translate'")))
 
