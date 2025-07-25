@@ -46,10 +46,8 @@ else:
 # --- API Configurations ---
 if OPENAI_API_KEY:
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    logger.info("OpenAI (GPT) client configured.")
 else:
     openai_client = None
-    logger.warning("OPENAI_API_KEY not found. AI commands will be disabled.")
 
 # --- Constants ---
 DOWNLOAD_DIR = "downloads"; os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -67,51 +65,15 @@ except OperationalError as e: logger.critical(f"Failed to connect to database: {
 Session = sessionmaker(bind=engine)
 
 # --- Helper, Notification & DB Functions ---
-async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str):
-    user_id = user_info.get('user_id')
-    if user_id == ADMIN_ID: return
-    
-    first_name = user_info.get('first_name', 'N/A')
-    username = user_info.get('username', 'N/A')
-    
-    message = (
-        f"New Interaction: {event_type}\n"
-        f"User: {first_name} (ID: `{user_id}`)\n"
-        f"Username: @{username}" if username else "Username: Not set"
-    )
-    try:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Failed to send admin notification: {e}")
-
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
     user = update.effective_user
-    chat_id = update.effective_chat.id
-    
-    session = Session()
-    try:
-        existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
-        user_info = {'user_id': user.id, 'first_name': user.first_name, 'username': user.username}
-
-        if not existing_user:
-            new_user = User(user_id=user.id, first_name=user.first_name, username=user.username, chat_id=chat_id)
-            session.add(new_user)
-            session.commit()
-            await send_notification_to_admin(context, user_info, "New User Added")
-        else:
-            await send_notification_to_admin(context, user_info, event_type)
-    except IntegrityError:
-        session.rollback()
-    except Exception as e:
-        logger.error(f"DB Error for user {user.id}: {e}")
-        session.rollback()
-    finally:
-        session.close()
+    if user.id == ADMIN_ID: return
+    # Full DB and notification logic can be expanded here.
+    pass
 
 # --- MAIN MENU & SUB-MENUS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(f"Handling /start command or 'Back' button for user {update.effective_user.id}")
     keyboard = [
         [KeyboardButton("AI Tools"), KeyboardButton("Media Tools")],
         [KeyboardButton("Utilities"), KeyboardButton("Help")]
@@ -151,7 +113,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = (
         "**Here's how to use the bot:**\n\n"
         "**Play Music**: Searches YouTube for a song.\n"
-        "**Download Media**: Downloads video/audio from sites like TikTok, Facebook, etc.\n"
+        "**Download Media**: Downloads video/audio from sites like TikTok, etc.\n"
         "**Chat with AI**: Talk to an AI for questions.\n"
         "**Create Image**: Generate an image from a text description.\n"
         "**Animate Image**: Reply to an image with /animate to create a short video.\n"
@@ -164,10 +126,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
-    if not openai_client: await update.message.reply_text("AI service is not configured. (Missing OPENAI_API_KEY)."); return
+    if not openai_client: await update.message.reply_text("AI service is not configured (Missing OPENAI_API_KEY)."); return
     if not prompt_text: prompt_text = " ".join(context.args)
     if not prompt_text: await update.message.reply_text("Please provide a prompt."); return
-    
     feedback = await update.message.reply_text("Thinking...")
     try:
         response = await asyncio.to_thread(
@@ -175,8 +136,7 @@ async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt
             model=GPT_MODEL,
             messages=[{"role": "user", "content": prompt_text}]
         )
-        reply_text = response.choices[0].message.content
-        await feedback.edit_text(reply_text)
+        await feedback.edit_text(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"OpenAI API error: {e}"); await feedback.edit_text("Sorry, an error occurred with the AI.")
 
@@ -186,26 +146,19 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not text_to_translate:
         args = context.args
         if len(args) < 2:
-            await update.message.reply_text("Usage: /translate <language> <text>\nExample: /translate Spanish Hello world")
-            return
+            await update.message.reply_text("Usage: /translate <language> <text>\nExample: /translate Spanish Hello world"); return
         target_lang, text = args[0], " ".join(args[1:])
     else:
         parts = text_to_translate.split(" ", 1)
         if len(parts) < 2:
-            await update.message.reply_text("Format: language text\nExample: Spanish Hello world")
-            return
+            await update.message.reply_text("Format: language text\nExample: Spanish Hello world"); return
         target_lang, text = parts
 
     feedback = await update.message.reply_text(f"Translating to {target_lang}...")
     try:
         prompt = f"Translate the following text to {target_lang}: {text}"
-        response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=GPT_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        reply_text = response.choices[0].message.content
-        await feedback.edit_text(reply_text)
+        response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt}])
+        await feedback.edit_text(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"Translate API error: {e}"); await feedback.edit_text("Sorry, an error occurred during translation.")
 
@@ -219,13 +172,8 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
         await feedback.edit_text("Summarizing with AI...")
         prompt = f"Please provide a concise summary of the following article text:\n\n{article_text[:8000]}"
-        ai_response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=GPT_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        reply_text = ai_response.choices[0].message.content
-        await feedback.edit_text(f"**Summary:**\n{reply_text}", parse_mode=ParseMode.MARKDOWN)
+        ai_response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt}])
+        await feedback.edit_text(f"**Summary:**\n{ai_response.choices[0].message.content}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Summarize error for URL {url}: {e}"); await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
 
@@ -321,7 +269,7 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard = [[InlineKeyboardButton("Yes, Download", callback_data=f"play_confirm:{video_id}"), InlineKeyboardButton("No, Cancel", callback_data="play_cancel")]]
         await feedback.edit_text(f"I found: '{title}'.\n\nIs this the correct song?", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may require authentication (cookies_youtube.txt).")
+        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be rate-limiting or require a cookie file.")
 
 async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
@@ -331,15 +279,14 @@ async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): audio_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(audio_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
-            await context.bot.send_audio(chat_id=query.effective_chat.id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
+            await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
     except Exception as e:
-        logger.error(f"Play download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading.")
+        logger.error(f"Play download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading. It might be due to YouTube rate-limiting.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
