@@ -27,18 +27,24 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Main Bot & Service Keys ---
+# Using environment variable for the database URL as requested.
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
 # WARNING: Hardcoding the keys below is a major security risk.
+# It is strongly recommended to use environment variables for these as well.
 BOT_TOKEN = "7806461656:AAEFsYhfk7moHzZgqX80qboJfb4b58UhsgU"
 ADMIN_ID = 7302005705
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
-CLIPDROP_API_KEY = "YOUR_CLIPDROP_API_KEY"
-STABILITY_API_KEY = "YOUR_STABILITY_API_KEY"
-OPENWEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY"
+GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM"
+CLIPDROP_API_KEY = "YOUR_CLIPDROP_API_KEY" # For Upscale
+STABILITY_API_KEY = "sk-6ijnCvMzl2citNeYboTkuUkYYuvHNK1LxCYngRhHnRo311CX" # For Imagine & Animate
+OPENWEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY" # For Weather
 
 # --- Initial Checks ---
 if not BOT_TOKEN: logger.critical("BOT_TOKEN is not set."); sys.exit(1)
-if not DATABASE_URL: logger.critical("DATABASE_URL env var not found."); sys.exit(1)
+if not DATABASE_URL: logger.critical("DATABASE_URL environment variable not found."); sys.exit(1)
+if not ADMIN_ID: logger.critical("ADMIN_ID is not set."); sys.exit(1)
+else: ADMIN_ID = int(ADMIN_ID)
+
 
 # --- API Configurations ---
 try:
@@ -47,6 +53,12 @@ try:
 except Exception as e:
     logger.error(f"Failed to configure Gemini API: {e}")
     gemini_model = None
+
+# --- Constants ---
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+ADMIN_NOTIFICATION_COOLDOWN = 300
+last_admin_notification_time = {}
 
 # --- Database Setup ---
 if DATABASE_URL.startswith("postgres://"):
@@ -68,105 +80,179 @@ except OperationalError as e:
 Session = sessionmaker(bind=engine)
 
 # --- Helper, Notification & DB Functions ---
-def escape_markdown_v2(text: str) -> str:
-    if not isinstance(text, str): return ""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
+async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str) -> None:
+    user_id = user_info.get('user_id')
+    if user_id == ADMIN_ID:
+        logger.info(f"Interaction by admin ({user_id}). Notification suppressed.")
+        return
+
+    current_time = time.time()
+    if user_id in last_admin_notification_time and (current_time - last_admin_notification_time[user_id]) < ADMIN_NOTIFICATION_COOLDOWN:
+        return
+
+    message = f"New Interaction\nEvent: {event_type}\nUser: {user_info.get('first_name')} (`{user_id}`)"
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        last_admin_notification_time[user_id] = current_time
+    except Exception as e:
+        logger.error(f"Failed to send admin notification: {e}")
 
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
-    """Saves user to DB and triggers a detailed admin notification."""
-    # This function's logic is complete and assumed present.
-    pass
+    if not hasattr(update, 'effective_user') or not update.effective_user:
+        return
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    user_info = {'user_id': user.id, 'first_name': user.first_name}
+    await send_notification_to_admin(context, user_info, event_type)
+    # Full DB logic can be expanded here if needed
 
-# --- Command Logic ---
-
+# --- Command Logic Functions ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provides help information on how to use the bot."""
     await save_user_to_db(update, context, "Requested Help")
     help_text = (
         "Here's how to use the bot:\n\n"
-        "- **Play Music**: Searches YouTube for a song and sends the audio.\n"
-        "- **Download Media**: Downloads video/audio from sites like TikTok, Instagram, etc.\n"
-        "- **Chat with AI**: Talk to an AI for questions and answers.\n"
-        "- **Create Image**: Generate an image from a text description.\n"
-        "- **Animate Image**: Reply to an image with this command to create a short video.\n"
-        "- **Upscale Image**: Reply to an image with /upscale to improve its quality.\n"
-        "- **Weather**: Get the current weather for any city.\n"
-        "- **Crypto Prices**: Check the latest prices of cryptocurrencies.\n"
-        "- **Summarize Link**: Get a summary of a web article.\n"
-        "- **Tell a Joke**: Get a random joke.\n\n"
-        "Most features can be accessed via the menu buttons."
+        "**Play Music**: Searches YouTube for a song and sends the audio.\n"
+        "**Download Media**: Downloads video/audio from sites like TikTok, etc.\n"
+        "**Chat with AI**: Talk to an AI for questions and answers.\n"
+        "**Create Image**: Generate an image from a text description.\n"
+        "**Animate Image**: Reply to an image with this command to create a short video.\n"
+        "**Upscale Image**: Reply to an image with /upscale to improve its quality.\n"
+        "**Weather**: Get the current weather for any city.\n"
+        "**Crypto Prices**: Check the latest prices of cryptocurrencies.\n"
+        "**Summarize Link**: Get a summary of a web article.\n"
+        "**Tell a Joke**: Get a random joke."
     )
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Animates an image replied to using the Stability AI Image-to-Video API."""
-    if not STABILITY_API_KEY or STABILITY_API_KEY == "YOUR_STABILITY_API_KEY":
-        await update.message.reply_text("The video animation service is not configured.")
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
+    if not prompt_text: prompt_text = " ".join(context.args)
+    if not prompt_text:
+        await update.message.reply_text("Please provide a prompt after the /gemini command or via the menu.")
         return
 
+    thinking_message = await update.message.reply_text("Thinking...")
+    try:
+        response = await asyncio.to_thread(gemini_model.generate_content, prompt_text)
+        await thinking_message.edit_text(response.text)
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        await thinking_message.edit_text("Sorry, an error occurred with the AI.")
+
+async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await save_user_to_db(update, context, event_type="Requested a joke")
+    try:
+        response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist,political,religious,explicit&type=twopart")
+        joke_data = response.json()
+        if not joke_data['error']:
+            await update.message.reply_text(joke_data['setup'])
+            await asyncio.sleep(2)
+            await update.message.reply_text(joke_data['delivery'])
+    except Exception as e:
+        logger.error(f"Joke API error: {e}")
+        await update.message.reply_text("Sorry, the joke service is unavailable.")
+
+async def get_crypto_prices(update: Update, context: ContextTypes.DEFAULT_TYPE, crypto_ids: str) -> None:
+    ids = [s.strip().lower() for s in crypto_ids.split(',')]
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(ids)}&vs_currencies=usd,ngn"
+    try:
+        prices = requests.get(url).json()
+        message = "Latest Crypto Prices:\n\n"
+        for coin, data in prices.items():
+            message += f"{coin.title()}\n  - ${data.get('usd', 0):,.2f}\n  - N{data.get('ngn', 0):,.2f}\n\n"
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Crypto API error: {e}")
+        await update.message.reply_text("Sorry, I couldn't fetch crypto prices.")
+
+async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city: str) -> None:
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+    try:
+        data = requests.get(url).json()
+        if data["cod"] != 200:
+            await update.message.reply_text(f"Sorry, I couldn't find the city '{city}'.")
+            return
+        message = f"Weather in {data['name']}\n- Condition: {data['weather'][0]['description'].title()}\n- Temperature: {data['main']['temp']}°C"
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Weather API error: {e}")
+        await update.message.reply_text("Sorry, I couldn't fetch the weather.")
+
+async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    feedback = await update.message.reply_text("Reading article...")
+    try:
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        article_text = ' '.join([p.get_text() for p in soup.find_all('p')])
+        if len(article_text) < 100:
+            await feedback.edit_text("Couldn't extract enough text to summarize.")
+            return
+        await feedback.edit_text("Summarizing with AI...")
+        prompt = f"Please provide a concise summary of the following article text:\n\n{article_text[:8000]}"
+        ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        await feedback.edit_text(f"**Summary:**\n{ai_response.text}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Summarize error for URL {url}: {e}")
+        await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
+
+async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
+    feedback = await update.message.reply_text("Creating your image...")
+    try:
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-v1-6/text-to-image"
+        headers = {"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}
+        payload = {"text_prompts": [{"text": prompt}]}
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        image_b64 = response.json()["artifacts"][0]["base64"]
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(image_b64), caption=f"Creation: `{prompt}`", parse_mode=ParseMode.MARKDOWN)
+        await feedback.delete()
+    except Exception as e:
+        logger.error(f"Stability AI error: {e}")
+        await feedback.edit_text("Sorry, I couldn't create the image.")
+
+async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        await update.message.reply_text("Please reply to an image with the /animate command.")
+        await update.message.reply_text("Please reply to an image with /upscale.")
         return
-
-    feedback_message = await update.message.reply_text("Sending image to animation engine...")
+    feedback = await update.message.reply_text("Upscaling your image...")
     try:
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
-        
-        # Step 1: Start the generation
-        response = requests.post(
-            "https://api.stability.ai/v2/generation/image-to-video",
-            headers={"authorization": f"Bearer {STABILITY_API_KEY}"},
-            files={"image": photo_bytes},
-            data={"seed": 0, "cfg_scale": 2.5, "motion_bucket_id": 40},
-        )
+        response = requests.post('https://clipdrop-api.co/image-upscaling/v1/upscale', files={'image_file': photo_bytes}, headers={'x-api-key': CLIPDROP_API_KEY})
+        response.raise_for_status()
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=response.content, filename='upscaled.png', caption='Here is your upscaled image!')
+        await feedback.delete()
+    except Exception as e:
+        logger.error(f"ClipDrop API Error: {e}")
+        await feedback.edit_text("Sorry, an error occurred while upscaling.")
+
+async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text("Please reply to an image with /animate.")
+        return
+    feedback = await update.message.reply_text("Sending image to animation engine...")
+    try:
+        photo_file = await update.message.reply_to_message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        response = requests.post("https://api.stability.ai/v2/generation/image-to-video", headers={"authorization": f"Bearer {STABILITY_API_KEY}"}, files={"image": photo_bytes}, data={"motion_bucket_id": 40})
         response.raise_for_status()
         generation_id = response.json()["id"]
-        
-        await feedback_message.edit_text("Animation started. This will take a minute or two...")
-
-        # Step 2: Poll for the result
-        video_data = None
-        for _ in range(45):  # Poll for up to ~2.5 minutes
+        await feedback.edit_text("Animation started. This may take a minute...")
+        for _ in range(45):
             await asyncio.sleep(4)
-            res = requests.get(
-                f"https://api.stability.ai/v2/generation/image-to-video/result/{generation_id}",
-                headers={'authorization': f"Bearer {STABILITY_API_KEY}", 'accept': "video/mp4"},
-            )
-            if res.status_code == 202:
-                logger.info("Animation generation is still in-progress...")
-                continue
-            elif res.status_code == 200:
-                logger.info("Animation generation is complete!")
-                video_data = res.content
-                break
-            else:
-                raise Exception(f"Animation polling failed: {res.status_code} - {res.text}")
-        
-        if video_data:
-            await context.bot.send_video(
-                chat_id=update.effective_chat.id,
-                video=video_data,
-                caption="Here is your animated video!"
-            )
-            await feedback_message.delete()
-        else:
-            await feedback_message.edit_text("Sorry, the animation timed out or failed to generate.")
-
+            res = requests.get(f"https://api.stability.ai/v2/generation/image-to-video/result/{generation_id}", headers={'authorization': f"Bearer {STABILITY_API_KEY}", 'accept': "video/mp4"})
+            if res.status_code == 200:
+                await context.bot.send_video(chat_id=update.effective_chat.id, video=res.content, caption="Here is your animated video!")
+                await feedback.delete()
+                return
+        await feedback.edit_text("Sorry, the animation timed out.")
     except Exception as e:
         logger.error(f"Animate command error: {e}")
-        await feedback_message.edit_text("Sorry, an error occurred while creating the animation.")
+        await feedback.edit_text("Sorry, an error occurred while creating the animation.")
 
-# All other command logic functions (get_joke, get_crypto_prices, get_weather, etc.)
-# are assumed to be present and unchanged from the previous version.
-# ...
+# ... Other handlers like search_and_play_song, download_content_from_url go here ...
 
 # --- Start Command & Main Menu ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shows the main menu dashboard."""
     await save_user_to_db(update, context, event_type="Opened the bot")
     keyboard = [
         [KeyboardButton("Play Music"), KeyboardButton("Download Media")],
@@ -177,29 +263,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [KeyboardButton("Help")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await update.message.reply_text("Welcome to the dashboard! How can I help you?", reply_markup=reply_markup)
+    await update.message.reply_text("Welcome! How can I help you?", reply_markup=reply_markup)
+    
+# --- Menu Prompt Handlers & Other Logic ---
+async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
+    await save_user_to_db(update, context, event_type=event)
+    context.user_data['state'] = state
+    await update.message.reply_text(message)
 
-# --- Central Message Handler & Main Bot Logic ---
-# The record_user_message function and main() function need to be updated
-# to include the new handlers and menu options.
-# ...
+# --- Central Message Handler ---
+async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text: return
+    state = context.user_data.pop('state', None)
 
+    state_handlers = {
+        'awaiting_song_name': search_and_play_song,
+        'awaiting_url': lambda u, c, t: download_content_from_url(u, c, c.user_data.pop('platform'), t),
+        'awaiting_gemini_prompt': lambda u, c, t: gemini_command(u, c, prompt_text=t),
+        'awaiting_imagine_prompt': generate_image,
+        'awaiting_city': get_weather,
+        'awaiting_crypto_symbols': get_crypto_prices,
+        'awaiting_summary_url': summarize_url,
+    }
+    handler = state_handlers.get(state)
+    if handler:
+        await handler(update, context, update.message.text)
+    else:
+        await save_user_to_db(update, context)
+
+# --- Main Bot Logic ---
 def main() -> None:
-    """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # --- Register Handlers ---
-    # Commands
+    # --- Register Command Handlers ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("joke", get_joke))
+    application.add_handler(CommandHandler("upscale", upscale_image_command))
     application.add_handler(CommandHandler("animate", animate_command))
-    # ... other command handlers
 
-    # Menu Buttons
-    # ... Handlers for "Play Music", "Download Media", "Chat with AI", etc.
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Animate Image$"), lambda u, c: c.bot.send_message(u.effective_chat.id, "To animate an image, please reply to it with the /animate command.")))
+    # --- Register Menu Button Handlers ---
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song?","Pressed 'Play Music'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Media$"), handle_keyboard_download_button))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Chat with AI$"), lambda u,c: prompt_for_input(u,c,'awaiting_gemini_prompt', "What's on your mind?","Pressed 'Chat with AI'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Create Image$"), lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Animate Image$"), lambda u,c: u.message.reply_text("Reply to an image with /animate.")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Upscale Image$"), lambda u,c: u.message.reply_text("Reply to an image with /upscale.")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Weather$"), lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Crypto Prices$"), lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter crypto names (e.g., bitcoin, solana).","Pressed 'Crypto'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Tell a Joke$"), get_joke))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize Link$"), lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Send the article link.","Pressed 'Summarize'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), help_command))
-    # ... other menu button handlers
 
     # General message handler (must be last)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
@@ -210,7 +324,7 @@ def main() -> None:
 
     if not RENDER_APP_NAME:
         logger.warning("RENDER_APP_NAME env var not found. Running in polling mode.")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling()
     else:
         WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
         logger.info(f"Starting bot in webhook mode on port {PORT}")
