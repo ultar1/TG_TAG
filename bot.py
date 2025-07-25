@@ -12,11 +12,14 @@ import json
 from bs4 import BeautifulSoup
 import base64
 import fitz  # PyMuPDF
-import google.generativeai as genai # Restored
+import google.generativeai as genai
 import openai # For DALL-E image creation
 import pytesseract # For OCR
 from PIL import Image # For OCR
 import io # For OCR
+import smtplib
+from email.message import EmailMessage
+import shlex # For smart command parsing
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -29,6 +32,10 @@ from sqlalchemy.exc import OperationalError, IntegrityError
 from sqlalchemy.types import BigInteger
 import yt_dlp
 
+# Load environment variables from .env file for local development
+from dotenv import load_dotenv
+load_dotenv()
+
 # --- Configuration ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,8 +45,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 # AI Keys
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Restored
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") # For DALL-E only
+# Email Keys
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 # Other API Keys
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
@@ -50,6 +60,7 @@ if not all([BOT_TOKEN, DATABASE_URL, ADMIN_ID]):
     logger.critical("Critical environment variables are missing. Exiting.")
     sys.exit(1)
 else:
+    # Ensure ADMIN_ID is an integer for comparison
     ADMIN_ID = int(ADMIN_ID)
 
 # --- API Configurations ---
@@ -158,7 +169,7 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     keyboard = [
         [KeyboardButton("Weather"), KeyboardButton("Crypto Prices")],
         [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
-        [KeyboardButton("Ask a Riddle"), KeyboardButton("Convert Video to Audio")], # Added Riddle Button
+        [KeyboardButton("Ask a Riddle"), KeyboardButton("Convert Video to Audio")],
         [KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -177,7 +188,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/summarize_file**: Reply to a PDF or image to summarize it.\n"
         "**/play <song name>**: Search and download a song or video.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
-        "**/riddle**: Get a random riddle."
+        "**/riddle**: Get a random riddle.\n"
+        "**/gmail**: Send an email (Admin only)."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -224,6 +236,60 @@ async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         logger.error(f"Gemini command error: {e}")
         await update.message.reply_text("Sorry, an error occurred with the AI.")
 
+async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends an email. Restricted to the ADMIN_ID."""
+    # --- ADMIN CHECK ---
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the admin only.")
+        return
+
+    sender_email = os.environ.get("GMAIL_ADDRESS")
+    sender_password = os.environ.get("GMAIL_APP_PASSWORD")
+
+    if not sender_email or not sender_password:
+        await update.message.reply_text("The email service is not configured on the server.")
+        return
+
+    try:
+        args = shlex.split(" ".join(context.args))
+        if len(args) < 3:
+            raise ValueError("Not enough arguments")
+        to_address, subject, body = args[0], args[1], args[2]
+    except Exception:
+        await update.message.reply_text(
+            "Incorrect format. Please use:\n"
+            "`/gmail <email> \"<subject>\" <message body>`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    feedback = await update.message.reply_text(f"Sending email to {to_address}...")
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = sender_email
+    msg['To'] = to_address
+
+    def send_email_sync():
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp_server:
+                smtp_server.login(sender_email, sender_password)
+                smtp_server.send_message(msg)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send email: {e}")
+            return False
+
+    try:
+        success = await asyncio.to_thread(send_email_sync)
+        if success:
+            await feedback.edit_text("Email sent successfully!")
+        else:
+            await feedback.edit_text("Failed to send the email. Please check the server logs.")
+    except Exception as e:
+        logger.error(f"Gmail command failed: {e}")
+        await feedback.edit_text("An unexpected error occurred while sending the email.")
+
 async def read_text_from_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
         await update.message.reply_text("Please reply to an image with /readtext or use the menu button.")
@@ -252,7 +318,6 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
         await feedback.edit_text("Content extracted. Summarizing with AI...")
         prompt = f"Please provide a concise but comprehensive summary of the following article text:\n\n{article_text[:15000]}"
-        
         ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt)
         await feedback.edit_text(ai_response.text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -481,14 +546,10 @@ async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception: await update.message.reply_text("Sorry, couldn't get a joke.")
 
 async def get_riddle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches a random riddle and sends it to the user."""
     try:
         response = requests.get("https://riddles-api.vercel.app/random", timeout=7).json()
-        riddle = response.get('riddle')
-        answer = response.get('answer')
-        if not riddle or not answer:
-            await update.message.reply_text("Sorry, I couldn't think of a riddle right now.")
-            return
+        riddle, answer = response.get('riddle'), response.get('answer')
+        if not riddle or not answer: await update.message.reply_text("Sorry, I couldn't think of a riddle right now."); return
         await update.message.reply_text(f"Here is your riddle:\n\n*_{riddle}_*", parse_mode=ParseMode.MARKDOWN)
         await asyncio.sleep(8) 
         await update.message.reply_text(f"**Answer:**\n||{escape_markdown(answer, version=2)}||", parse_mode=ParseMode.MARKDOWN_V2)
@@ -556,23 +617,21 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
     
-    # Command Handlers
     cmd_handlers = [
         CommandHandler("start", start), CommandHandler("help", help_command),
         CommandHandler("gemini", gemini_command), CommandHandler("create", create_image_command),
         CommandHandler("upscale", upscale_image_command), CommandHandler("animate", animate_command),
         CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
-        CommandHandler("riddle", get_riddle), # Added Riddle command
+        CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
     ]
     
-    # Menu Button Handlers
     menu_button_texts = {
         "AI Tools": show_ai_tools_menu, "Media Tools": show_media_tools_menu,
         "Utilities": show_utilities_menu, "Help": help_command,
         "Back to Main Menu": start, "End Chat": end_chat,
         "Chat with AI": start_ai_chat, "Tell a Joke": get_joke,
-        "Ask a Riddle": get_riddle, # Added Riddle button
+        "Ask a Riddle": get_riddle,
         "Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
         "Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
         "Upscale Image": lambda u,c: u.message.reply_text("Please reply to an image with /upscale."),
@@ -588,7 +647,6 @@ def main() -> None:
     }
     msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in menu_button_texts.items()]
 
-    # Callback Query Handlers
     callback_handlers = [
         CallbackQueryHandler(handle_play_confirmation, pattern="^play_confirm:"),
         CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"),
@@ -600,7 +658,6 @@ def main() -> None:
     application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(menu_button_texts.keys())})$"), record_user_message))
     
-    # Webhook setup for deployment
     PORT = int(os.environ.get("PORT", 8443))
     RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
     if not RENDER_APP_NAME:
