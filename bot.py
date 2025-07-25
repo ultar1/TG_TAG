@@ -14,7 +14,8 @@ import openai # For DALL-E 3
 import pytesseract # For OCR
 from PIL import Image # For OCR
 import io # For OCR
-import azapi # ✅ NEW: For fetching lyrics
+import azapi # For fetching lyrics
+from googlesearch import search # For Browse google
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -61,7 +62,11 @@ try:
     else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
 except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
 
-# --- Database Setup ---
+# --- Constants & Database Setup ---
+# ✅ FIX: Ensured DOWNLOAD_DIR is defined globally here. This fixes the NameError.
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 if DATABASE_URL.startswith("postgres://"): DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 Base = declarative_base()
 class User(Base):
@@ -165,7 +170,7 @@ async def read_text_from_image_command(update: Update, context: ContextTypes.DEF
             await feedback.edit_text("Couldn't find any readable text in the image.")
     except Exception as e:
         logger.error(f"OCR Error: {e}")
-        if "Tesseract is not installed" in str(e):
+        if "Tesseract is not installed" in str(e) or "command not found" in str(e).lower():
              await feedback.edit_text("OCR processing failed. The Tesseract engine is not installed on the server.")
         else:
             await feedback.edit_text("Sorry, an error occurred while processing the image.")
@@ -347,17 +352,21 @@ async def get_lyrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_reply_markup(None)
     feedback = await query.message.reply_text(f"Searching for lyrics for '{title}' by '{artist}'...")
     try:
-        url = f"https://api.lyrics.ovh/v1/{artist}/{title}"; response = requests.get(url, timeout=10)
-        if response.status_code == 200 and response.json().get("lyrics"):
-            lyrics = response.json()["lyrics"]
-            if len(lyrics) > 4000: await feedback.edit_text(f"*Lyrics for {title} by {artist}:*\n\n{escape_markdown(lyrics[:4000], version=2)}\n\n(Lyrics truncated)", parse_mode=ParseMode.MARKDOWN_V2)
-            else: await feedback.edit_text(f"*Lyrics for {title} by {artist}:*\n\n{escape_markdown(lyrics, version=2)}", parse_mode=ParseMode.MARKDOWN_V2)
+        az_api = azapi.AZlyrics('google', accuracy=0.5)
+        az_api.artist = artist; az_api.title = title
+        lyrics = await asyncio.to_thread(az_api.getLyrics, save=False)
+        if lyrics:
+            full_message = f"*Lyrics for {title} by {artist}:*\n\n{lyrics}"
+            if len(full_message) > 4000:
+                await feedback.edit_text(f"{escape_markdown(full_message[:4000], version=2)}\n\n(Lyrics truncated)", parse_mode=ParseMode.MARKDOWN_V2)
+            else:
+                await feedback.edit_text(escape_markdown(full_message, version=2), parse_mode=ParseMode.MARKDOWN_V2)
             return
-    except Exception as e: logger.warning(f"Lyrics.ovh API failed: {e}. Trying Gemini fallback.")
+    except Exception as e: logger.warning(f"azapi library failed: {e}. Trying Gemini fallback.")
     if gemini_model:
         try:
             await feedback.edit_text("Primary search failed. Asking Gemini for the lyrics...")
-            prompt = f"Please find the full lyrics for the song '{title}' by '{artist}'. If you find them, present them clearly. If you cannot find them, just say 'Sorry, I could not find the lyrics for this song.'"
+            prompt = f"Please act as a lyric-finding expert. Search reliable sources like AZLyrics, Genius, or Musixmatch for the full, accurate lyrics of the song '{title}' by '{artist}'. Present the lyrics clearly. If you cannot find them, state that you were unable to locate the lyrics after searching."
             response = await asyncio.to_thread(gemini_model.generate_content, prompt)
             await feedback.edit_text(escape_markdown(response.text, version=2), parse_mode=ParseMode.MARKDOWN_V2)
             return
@@ -394,23 +403,17 @@ async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text: return
-    
-    # This list contains all button texts. The handler will ignore them to prevent the bug.
     BUTTON_TEXTS = [
         "AI Tools", "Media Tools", "Utilities", "Help", "Back to Main Menu",
         "Chat with AI", "Create Image", "Read Text from Image", "Animate Image",
         "Upscale Image", "Summarize Link", "Summarize File", "Play Music / Video",
         "Download Media", "Weather", "Crypto Prices", "Translate Text", "Tell a Joke"
     ]
-    if update.message.text in BUTTON_TEXTS:
-        return # This is a button press, not a reply to a prompt.
-
+    if update.message.text in BUTTON_TEXTS: return
     state = context.user_data.get('state')
     if state == 'continuous_chat': await gemini_command(update, context); return
-    
     state = context.user_data.pop('state', None)
     if not state: await save_user_to_db(update, context, "Sent a message"); return
-    
     text = update.message.text
     state_handlers = {
         'awaiting_song_name': lambda: search_and_play_song(update, context, song_name=text),
