@@ -270,6 +270,13 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await feedback.edit_text("Sorry, the animation timed out or failed.")
     except Exception as e: logger.error(f"Animate command error: {e}"); await feedback.edit_text(f"Sorry, an error occurred: {e}")
 
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    song_name = " ".join(context.args)
+    if not song_name:
+        await update.message.reply_text("Please provide a song name after the command, like this: /play Burna Boy - Last Last")
+        return
+    await search_and_play_song(update, context, song_name)
+
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
     feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
     try:
@@ -405,7 +412,8 @@ def main() -> None:
     cmd_handlers = [CommandHandler(cmd, func) for cmd, func in [
         ("start", start), ("help", help_command), ("upscale", upscale_image_command),
         ("animate", animate_command), ("summarize_file", summarize_file_command),
-        ("gemini", gemini_command), ("readtext", read_text_from_image_command)
+        ("gemini", gemini_command), ("readtext", read_text_from_image_command),
+        ("play", play_command)
     ]]
     msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in [
         ("AI Tools", show_ai_tools_menu), ("Media Tools", show_media_tools_menu),
