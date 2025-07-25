@@ -108,13 +108,13 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
-# --- Command Logic Functions ---
+# --- Command Logic ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, "Requested Help")
     help_text = (
         "**Here's how to use the bot:**\n\n"
         "**Play Music**: Searches YouTube for a song.\n"
-        "**Download Media**: Downloads video/audio from sites like TikTok.\n"
+        "**Download Media**: Downloads video/audio from sites like TikTok, Facebook, etc.\n"
         "**Chat with AI**: Talk to an AI for questions.\n"
         "**Create Image**: Generate an image from a text description.\n"
         "**Animate Image**: Reply to an image with /animate to create a short video.\n"
@@ -260,14 +260,21 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
     feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
     try:
-        with yt_dlp.YoutubeDL({'default_search': 'ytsearch', 'noplaylist': True, 'quiet': True}) as ydl:
-            info = ydl.extract_info(song_name, download=False)
+        # Use "ytsearch1:" to be more explicit and get only the top result.
+        with yt_dlp.YoutubeDL({'noplaylist': True, 'quiet': True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+        
         if not info.get('entries'): await feedback.edit_text("Sorry, couldn't find any results."); return
-        video_info = info['entries'][0]; title = video_info.get('title', 'Unknown Title'); video_id = video_info.get('id')
+        
+        video_info = info['entries'][0]
+        title = video_info.get('title', 'Unknown Title')
+        video_id = video_info.get('id')
+        
         keyboard = [[InlineKeyboardButton("Yes, Download", callback_data=f"play_confirm:{video_id}"), InlineKeyboardButton("No, Cancel", callback_data="play_cancel")]]
         await feedback.edit_text(f"I found: '{title}'.\n\nIs this the correct song?", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching.")
+        logger.error(f"Play search error for '{song_name}': {e}")
+        await feedback.edit_text("An error occurred while searching. Please try again.")
 
 async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
@@ -277,9 +284,10 @@ async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         with yt_dlp.YoutubeDL(audio_opts) as ydl:
-            info = ydl.extract_info(f"http://www.youtube.com/watch?v={video_id}", download=True)
+            info = ydl.extract_info(f"m.youtube.com{video_id}", download=True)
+        
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-        await query.edit_text("Sending audio...")
+        await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=query.effective_chat.id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
@@ -316,7 +324,10 @@ async def handle_keyboard_download_button(update: Update, context: ContextTypes.
     await show_download_options(update, context)
 
 async def show_download_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[InlineKeyboardButton("YouTube", callback_data="dl:YouTube"), InlineKeyboardButton("TikTok", callback_data="dl:TikTok")]]
+    keyboard = [
+        [InlineKeyboardButton("Facebook", callback_data="dl:Facebook"), InlineKeyboardButton("Instagram", callback_data="dl:Instagram")],
+        [InlineKeyboardButton("YouTube", callback_data="dl:YouTube"), InlineKeyboardButton("TikTok", callback_data="dl:TikTok")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "Please choose a platform to download from:"
     if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
@@ -395,7 +406,6 @@ def main() -> None:
         application.run_polling()
     else:
         WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
-        logger.info(f"Starting bot in webhook mode on port {PORT}")
         application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=WEBHOOK_URL)
 
 if __name__ == "__main__":
