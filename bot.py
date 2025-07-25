@@ -121,27 +121,27 @@ async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_in
 
 # --- Menu Functions ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("🤖 AI Tools"), KeyboardButton("🎬 Media Tools")], [KeyboardButton("🛠️ Utilities"), KeyboardButton("❓ Help")]]
+    keyboard = [[KeyboardButton("AI Tools"), KeyboardButton("Media Tools")], [KeyboardButton("Utilities"), KeyboardButton("Help")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Welcome! How can I help you today?\nSelect an option from the menu below.", reply_markup=reply_markup)
 
 async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
-        [KeyboardButton("💬 Chat with AI"), KeyboardButton("🎨 Create Image")],
-        [KeyboardButton("🔍 Read Text from Image"), KeyboardButton("🎞️ Animate Image")],
-        [KeyboardButton("✨ Upscale Image"), KeyboardButton("🔗 Summarize Link")],
-        [KeyboardButton("📄 Summarize File"), KeyboardButton("⬅️ Back to Main Menu")]
+        [KeyboardButton("Chat with AI"), KeyboardButton("Create Image")],
+        [KeyboardButton("Read Text from Image"), KeyboardButton("Animate Image")],
+        [KeyboardButton("Upscale Image"), KeyboardButton("Summarize Link")],
+        [KeyboardButton("Summarize File"), KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
 
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("🎵 Play Music / Video"), KeyboardButton("📥 Download Media")], [KeyboardButton("⬅️ Back to Main Menu")]]
+    keyboard = [[KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")], [KeyboardButton("Back to Main Menu")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
 async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("🌦️ Weather"), KeyboardButton("📈 Crypto Prices")], [KeyboardButton("🌐 Translate Text"), KeyboardButton("😂 Tell a Joke")], [KeyboardButton("⬅️ Back to Main Menu")]]
+    keyboard = [[KeyboardButton("Weather"), KeyboardButton("Crypto Prices")], [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")], [KeyboardButton("Back to Main Menu")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
@@ -165,7 +165,7 @@ async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await save_user_to_db(update, context, event_type="Started AI Chat")
     context.user_data['state'] = 'continuous_chat'
     context.user_data['gpt_history'] = [{"role": "system", "content": "You are a helpful and friendly assistant."}]
-    chat_keyboard = [[KeyboardButton("🔚 End Chat")]]
+    chat_keyboard = [[KeyboardButton("End Chat")]]
     reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
     await update.message.reply_text("You are now in a continuous chat with the AI.\n\nSend your message, or press 'End Chat' to return to the main menu.", reply_markup=reply_markup)
 
@@ -253,13 +253,8 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
     prompt = ""
     try:
         if replied_message.photo:
-            # For images, we'll use GPT-4 Vision which can take URLs
             await feedback_message.edit_text("Analyzing image with GPT Vision...")
             photo_file = await replied_message.photo[-1].get_file()
-            # A simple way to get a temporary public URL is not feasible,
-            # so we'll describe it based on text prompts if possible, or fallback.
-            # For now, let's keep it simple: we can't send local bytes directly to the chat model easily.
-            # A better approach for local images is to use a model that accepts base64, which GPT-4 does.
             photo_bytes = await photo_file.download_as_bytearray()
             base64_image = base64.b64encode(photo_bytes).decode('utf-8')
             messages = [{
@@ -292,7 +287,7 @@ async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not prompt: prompt = " ".join(context.args)
     if not prompt: await update.message.reply_text("Please describe the image you want to create."); return
     
-    feedback = await update.message.reply_text("🎨 Creating your image with DALL-E 3...")
+    feedback = await update.message.reply_text("Creating your image with DALL-E 3...")
     try:
         response = await openai_client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024", quality="standard")
         await context.bot.send_photo(update.effective_chat.id, photo=response.data[0].url, caption=f"Creation: `{prompt}`", parse_mode=ParseMode.MARKDOWN)
@@ -342,7 +337,7 @@ async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("To convert a video to audio, please reply to the video with the `/mp4` command.")
         return
     await save_user_to_db(update, context, event_type="Used /mp4 command")
-    feedback_message = await update.message.reply_text("📥 Downloading video...")
+    feedback_message = await update.message.reply_text("Downloading video...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir, exist_ok=True)
     try:
@@ -350,16 +345,16 @@ async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_T
         video_file = await video.get_file()
         original_video_path = os.path.join(temp_dir, f"{video.file_unique_id}.mp4")
         await video_file.download_to_drive(original_video_path)
-        await feedback_message.edit_text("⚙️ Converting to audio...")
+        await feedback_message.edit_text("Converting to audio...")
         output_audio_path = os.path.join(temp_dir, f"{video.file_unique_id}.mp3")
         ffmpeg_command = ['ffmpeg', '-i', original_video_path, '-vn', '-q:a', '0', '-map', 'a', output_audio_path]
         process = await asyncio.create_subprocess_exec(*ffmpeg_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await process.communicate()
         if process.returncode != 0:
             logger.error(f"FFmpeg conversion failed. Stderr: {stderr.decode()}")
-            await feedback_message.edit_text("❌ Sorry, the conversion failed.")
+            await feedback_message.edit_text("Sorry, the conversion failed.")
             return
-        await feedback_message.edit_text("📤 Uploading audio...")
+        await feedback_message.edit_text("Uploading audio...")
         with open(output_audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=update.effective_chat.id, audio=audio_file, title=video.file_name or "Converted Audio", duration=video.duration)
         await feedback_message.delete()
@@ -387,7 +382,7 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
             await feedback.edit_text("Sorry, couldn't find any results."); return
         video = info['entries'][0]
         title, video_id = video.get('title', 'Unknown Title'), video.get('id')
-        keyboard = [[InlineKeyboardButton("✅ Yes, that's it!", callback_data=f"play_confirm:{video_id}")], [InlineKeyboardButton("❌ No, cancel", callback_data="play_cancel")]]
+        keyboard = [[InlineKeyboardButton("Yes, that's it!", callback_data=f"play_confirm:{video_id}")], [InlineKeyboardButton("No, cancel", callback_data="play_cancel")]]
         await feedback.edit_text(f"I found: **{title}**\n\nIs this correct?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Play search error: {e}")
@@ -396,7 +391,7 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
-    keyboard = [[InlineKeyboardButton("🎵 Audio", callback_data=f"dl_audio:{video_id}"), InlineKeyboardButton("🎬 Video", callback_data=f"dl_video:{video_id}")]]
+    keyboard = [[InlineKeyboardButton("Audio", callback_data=f"dl_audio:{video_id}"), InlineKeyboardButton("Video", callback_data=f"dl_video:{video_id}")]]
     await query.edit_message_text("Choose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -514,9 +509,6 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if state == 'continuous_chat': await gpt_command(update, context); return
     state = context.user_data.pop('state', None)
     if not state:
-        # Default behavior for any text not matching a state or button
-        # You can add a default reply here, e.g., gpt_command(update, context)
-        # For now, we just log it.
         await save_user_to_db(update, context, "Sent a message")
         return
     text = update.message.text
@@ -548,21 +540,21 @@ def main() -> None:
     
     # Menu Button Handlers
     menu_button_texts = {
-        "🤖 AI Tools": show_ai_tools_menu, "🎬 Media Tools": show_media_tools_menu,
-        "🛠️ Utilities": show_utilities_menu, "❓ Help": help_command,
-        "⬅️ Back to Main Menu": start, "🔚 End Chat": end_chat,
-        "💬 Chat with AI": start_ai_chat, "😂 Tell a Joke": get_joke,
-        "🎨 Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
-        "🔍 Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
-        "✨ Upscale Image": lambda u,c: u.message.reply_text("Please reply to an image with /upscale."),
-        "🎞️ Animate Image": lambda u,c: u.message.reply_text("Please reply to an image with /animate."),
-        "📄 Summarize File": lambda u,c: u.message.reply_text("Please reply to an image or PDF with /summarize_file."),
-        "🔗 Summarize Link": lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Please send the article link.","Pressed 'Summarize Link'"),
-        "🎵 Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
-        "📥 Download Media": show_download_platform_options,
-        "🌦️ Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
-        "📈 Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
-        "🌐 Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
+        "AI Tools": show_ai_tools_menu, "Media Tools": show_media_tools_menu,
+        "Utilities": show_utilities_menu, "Help": help_command,
+        "Back to Main Menu": start, "End Chat": end_chat,
+        "Chat with AI": start_ai_chat, "Tell a Joke": get_joke,
+        "Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
+        "Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
+        "Upscale Image": lambda u,c: u.message.reply_text("Please reply to an image with /upscale."),
+        "Animate Image": lambda u,c: u.message.reply_text("Please reply to an image with /animate."),
+        "Summarize File": lambda u,c: u.message.reply_text("Please reply to an image or PDF with /summarize_file."),
+        "Summarize Link": lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Please send the article link.","Pressed 'Summarize Link'"),
+        "Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
+        "Download Media": show_download_platform_options,
+        "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
+        "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
+        "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
     }
     msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in menu_button_texts.items()]
 
