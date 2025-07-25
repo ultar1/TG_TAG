@@ -12,4 +12,5 @@ nltk>=3.8.1
 requests
 beautifulsoup4
 openai
+PyMuPDF
 
