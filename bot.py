@@ -14,6 +14,7 @@ import openai # For DALL-E 3
 import pytesseract # For OCR
 from PIL import Image # For OCR
 import io # For OCR
+import azapi # ✅ NEW: For fetching lyrics
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -60,8 +61,7 @@ try:
     else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
 except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
 
-# --- Constants & Database Setup ---
-DOWNLOAD_DIR = "downloads"; os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# --- Database Setup ---
 if DATABASE_URL.startswith("postgres://"): DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 Base = declarative_base()
 class User(Base):
@@ -395,7 +395,7 @@ async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text: return
     
-    # ✅ FIX: This list contains all button texts. The handler will ignore them.
+    # This list contains all button texts. The handler will ignore them to prevent the bug.
     BUTTON_TEXTS = [
         "AI Tools", "Media Tools", "Utilities", "Help", "Back to Main Menu",
         "Chat with AI", "Create Image", "Read Text from Image", "Animate Image",
@@ -403,7 +403,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         "Download Media", "Weather", "Crypto Prices", "Translate Text", "Tell a Joke"
     ]
     if update.message.text in BUTTON_TEXTS:
-        return # This is a button press, not a reply to a prompt. Let the button handlers manage it.
+        return # This is a button press, not a reply to a prompt.
 
     state = context.user_data.get('state')
     if state == 'continuous_chat': await gemini_command(update, context); return
