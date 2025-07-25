@@ -15,3 +15,4 @@ openai
 PyMuPDF
 azapi
 googlesearch-python
+python-dotenv
