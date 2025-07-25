@@ -11,4 +11,5 @@ sumy>=0.11.0
 nltk>=3.8.1
 requests
 beautifulsoup4
+openai
 
