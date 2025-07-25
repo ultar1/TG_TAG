@@ -60,7 +60,8 @@ try:
     else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
 except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
 
-# --- Database Setup ---
+# --- Constants & Database Setup ---
+DOWNLOAD_DIR = "downloads"; os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 if DATABASE_URL.startswith("postgres://"): DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 Base = declarative_base()
 class User(Base):
@@ -278,14 +279,18 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await search_and_play_song(update, context, song_name)
 
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
-    feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
+    message_to_reply = update.message or update.callback_query.message
+    feedback = await message_to_reply.reply_text(f"Searching for '{song_name}'...")
     try:
         ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1', 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(song_name, download=False)
         if not info.get('entries'): await feedback.edit_text("Sorry, couldn't find any results."); return
         video = info['entries'][0]
-        keyboard = [[InlineKeyboardButton("Audio", callback_data=f"play_audio:{video['id']}"), InlineKeyboardButton("Video", callback_data=f"select_quality:{video['id']}")], [InlineKeyboardButton("Cancel", callback_data="play_cancel")]]
-        await feedback.edit_text(f"Found: '{escape_markdown(video['title'], version=2)}'.\n\nChoose a format:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
+        title = video.get('title', 'Unknown Title'); video_id = video.get('id')
+        message_text = f"Found: '{title}'.\n\nChoose a format:"
+        escaped_text = escape_markdown(message_text, version=2)
+        keyboard = [[InlineKeyboardButton("Audio", callback_data=f"play_audio:{video_id}"), InlineKeyboardButton("Video", callback_data=f"select_quality:{video_id}")], [InlineKeyboardButton("Cancel", callback_data="play_cancel")]]
+        await feedback.edit_text(text=escaped_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e: logger.error(f"Play search error: {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be blocking your server. Please make sure `cookies_youtube.txt` is present and valid.")
 
 async def show_quality_options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -389,8 +394,20 @@ async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text: return
+    
+    # ✅ FIX: This list contains all button texts. The handler will ignore them.
+    BUTTON_TEXTS = [
+        "AI Tools", "Media Tools", "Utilities", "Help", "Back to Main Menu",
+        "Chat with AI", "Create Image", "Read Text from Image", "Animate Image",
+        "Upscale Image", "Summarize Link", "Summarize File", "Play Music / Video",
+        "Download Media", "Weather", "Crypto Prices", "Translate Text", "Tell a Joke"
+    ]
+    if update.message.text in BUTTON_TEXTS:
+        return # This is a button press, not a reply to a prompt. Let the button handlers manage it.
+
     state = context.user_data.get('state')
     if state == 'continuous_chat': await gemini_command(update, context); return
+    
     state = context.user_data.pop('state', None)
     if not state: await save_user_to_db(update, context, "Sent a message"); return
     
