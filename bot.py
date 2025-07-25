@@ -12,7 +12,8 @@ import json
 from bs4 import BeautifulSoup
 import base64
 import fitz  # PyMuPDF
-import openai # For GPT
+import google.generativeai as genai # Restored
+import openai # For DALL-E image creation
 import pytesseract # For OCR
 from PIL import Image # For OCR
 import io # For OCR
@@ -37,8 +38,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 # AI Keys
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-4o").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Restored
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") # For DALL-E only
 # Other API Keys
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
@@ -53,15 +54,28 @@ else:
 
 # --- API Configurations ---
 try:
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        logger.info("Gemini AI client configured.")
+    else:
+        gemini_model = None
+        logger.warning("GEMINI_API_KEY not found. AI commands will be disabled.")
+except Exception as e:
+    gemini_model = None
+    logger.error(f"Failed to configure Gemini API: {e}")
+
+try:
     if OPENAI_API_KEY:
         openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        logger.info(f"OpenAI (GPT) client configured with model {GPT_MODEL}.")
+        logger.info("OpenAI client configured for DALL-E.")
     else:
         openai_client = None
-        logger.warning("OPENAI_API_KEY not found. AI commands will be disabled.")
+        logger.warning("OPENAI_API_KEY not found. Image creation will be disabled.")
 except Exception as e:
     openai_client = None
     logger.error(f"Failed to configure OpenAI API: {e}")
+
 
 # --- Constants & Database Setup ---
 DOWNLOAD_DIR = "downloads"
@@ -141,7 +155,12 @@ async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
 async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[KeyboardButton("Weather"), KeyboardButton("Crypto Prices")], [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")], [KeyboardButton("Back to Main Menu")]]
+    keyboard = [
+        [KeyboardButton("Weather"), KeyboardButton("Crypto Prices")],
+        [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
+        [KeyboardButton("Convert Video to Audio")], # Added Button
+        [KeyboardButton("Back to Main Menu")]
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
@@ -150,7 +169,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = (
         "**Bot Commands Guide:**\n\n"
         "You can use the menu buttons or the following commands:\n\n"
-        "**/gpt <prompt>**: Ask the AI a question.\n"
+        "**/gemini <prompt>**: Ask the AI a question.\n"
         "**/readtext**: Reply to an image to read text from it.\n"
         "**/create <prompt>**: Generate an image from text.\n"
         "**/animate**: Reply to an image to create a video.\n"
@@ -164,24 +183,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, event_type="Started AI Chat")
     context.user_data['state'] = 'continuous_chat'
-    context.user_data['gpt_history'] = [{"role": "system", "content": "You are a helpful and friendly assistant."}]
+    # Use gemini_history for Gemini's conversational memory
+    context.user_data['gemini_history'] = []
     chat_keyboard = [[KeyboardButton("End Chat")]]
     reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
     await update.message.reply_text("You are now in a continuous chat with the AI.\n\nSend your message, or press 'End Chat' to return to the main menu.", reply_markup=reply_markup)
 
 async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop('state', None)
-    context.user_data.pop('gpt_history', None)
+    context.user_data.pop('gemini_history', None)
     await update.message.reply_text("Chat ended. Returning to the main menu.")
     await start(update, context)
 
-async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
-    if not openai_client:
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
+    if not gemini_model:
         await update.message.reply_text("AI service is not configured.")
         return
 
     is_continuous_chat = context.user_data.get('state') == 'continuous_chat'
-    
+    history = context.user_data.get('gemini_history', []) if is_continuous_chat else []
+
     if not prompt_text:
         prompt_text = " ".join(context.args) if not is_continuous_chat else update.message.text
     
@@ -191,23 +212,16 @@ async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
-    messages = context.user_data.get('gpt_history', [{"role": "system", "content": "You are a helpful and friendly assistant."}]) if is_continuous_chat else [{"role": "system", "content": "You are a helpful and friendly assistant."}]
-    messages.append({"role": "user", "content": prompt_text})
-    
     try:
-        response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=GPT_MODEL,
-            messages=messages
-        )
-        reply_text = response.choices[0].message.content
-        if is_continuous_chat:
-            context.user_data['gpt_history'].append({"role": "user", "content": prompt_text})
-            context.user_data['gpt_history'].append({"role": "assistant", "content": reply_text})
+        chat_session = gemini_model.start_chat(history=history)
+        response = await asyncio.to_thread(chat_session.send_message, prompt_text)
         
-        await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+        if is_continuous_chat:
+            context.user_data['gemini_history'] = chat_session.history
+        
+        await update.message.reply_text(response.text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"GPT command error: {e}")
+        logger.error(f"Gemini command error: {e}")
         await update.message.reply_text("Sorry, an error occurred with the AI.")
 
 async def read_text_from_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -221,7 +235,7 @@ async def read_text_from_image_command(update: Update, context: ContextTypes.DEF
         image = Image.open(io.BytesIO(await photo_file.download_as_bytearray()))
         text = await asyncio.to_thread(pytesseract.image_to_string, image)
         if text and not text.isspace():
-            await feedback.edit_text(f"**Extracted Text:**\n\n{text}")
+            await feedback.edit_text(f"**Extracted Text:**\n\n{text}", parse_mode=ParseMode.MARKDOWN)
         else:
             await feedback.edit_text("Couldn't find any readable text in the image.")
     except Exception as e:
@@ -229,7 +243,7 @@ async def read_text_from_image_command(update: Update, context: ContextTypes.DEF
         await feedback.edit_text("Sorry, an error occurred while processing the image.")
 
 async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    if not openai_client: await update.message.reply_text("AI summarizer is not configured."); return
+    if not gemini_model: await update.message.reply_text("AI summarizer is not configured."); return
     feedback = await update.message.reply_text("Analyzing link...")
     try:
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
@@ -238,42 +252,38 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         if len(article_text) < 100: await feedback.edit_text("Couldn't extract enough text to summarize."); return
         await feedback.edit_text("Content extracted. Summarizing with AI...")
         prompt = f"Please provide a concise but comprehensive summary of the following article text:\n\n{article_text[:15000]}"
-        await gpt_command(update, context, prompt_text=prompt)
-        await feedback.delete()
+        
+        # Call gemini_command to handle the API call
+        ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+        await feedback.edit_text(ai_response.text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Summarize URL error for {url}: {e}")
         await feedback.edit_text("Sorry, I couldn't read or summarize that URL.")
 
 async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not openai_client: await update.message.reply_text("AI service is not configured."); return
+    if not gemini_model: await update.message.reply_text("AI service is not configured."); return
     if not update.message.reply_to_message: await update.message.reply_text("Please reply to an image or a PDF file with /summarize_file."); return
     
     replied_message = update.message.reply_to_message
     feedback_message = await replied_message.reply_text("Processing file...")
-    prompt = ""
+    summary = ""
     try:
         if replied_message.photo:
-            await feedback_message.edit_text("Analyzing image with GPT Vision...")
+            await feedback_message.edit_text("Analyzing image...")
             photo_file = await replied_message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            base64_image = base64.b64encode(photo_bytes).decode('utf-8')
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }]
-            response = await asyncio.to_thread(openai_client.chat.completions.create, model="gpt-4o", messages=messages, max_tokens=500)
-            summary = response.choices[0].message.content
+            image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
+            prompt = "Describe this image in detail."
+            response = await asyncio.to_thread(gemini_model.generate_content, [prompt, image_part])
+            summary = response.text
         elif replied_message.document and replied_message.document.mime_type == 'application/pdf':
             pdf_file = await replied_message.document.get_file()
             with fitz.open(stream=await pdf_file.download_as_bytearray(), filetype="pdf") as doc: full_text = "".join(page.get_text() for page in doc)
             if not full_text.strip(): await feedback_message.edit_text("Could not extract any text from this PDF."); return
             await feedback_message.edit_text("Extracted text. Summarizing...")
             prompt = f"Please provide a detailed summary of the following document:\n\n{full_text[:15000]}"
-            response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt}])
-            summary = response.choices[0].message.content
+            response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+            summary = response.text
         else:
             await feedback_message.edit_text("This command only works on an image or PDF file."); return
 
@@ -283,7 +293,7 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
         await feedback_message.edit_text("Sorry, an error occurred while processing the file.")
 
 async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str = None) -> None:
-    if not openai_client: await update.message.reply_text("Image generation service not configured."); return
+    if not openai_client: await update.message.reply_text("Image generation service (OpenAI) is not configured."); return
     if not prompt: prompt = " ".join(context.args)
     if not prompt: await update.message.reply_text("Please describe the image you want to create."); return
     
@@ -490,12 +500,14 @@ async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city: 
     except Exception: await update.message.reply_text("Sorry, couldn't fetch the weather.")
 
 async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_translate: str = None) -> None:
-    if not openai_client: await update.message.reply_text("Translate service is not configured."); return
+    if not gemini_model: await update.message.reply_text("Translate service is not configured."); return
     if not text_to_translate: text_to_translate = " ".join(context.args)
     parts = text_to_translate.split(" ", 1)
     if len(parts) < 2: await update.message.reply_text("Format: `<language> <text>`"); return
     target_lang, text = parts
-    await gpt_command(update, context, prompt_text=f"Translate the following text to {target_lang}: {text}")
+    prompt = f"Translate the following text to {target_lang}: {text}"
+    response = await asyncio.to_thread(gemini_model.generate_content, prompt)
+    await update.message.reply_text(response.text)
 
 # --- Message Routing ---
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
@@ -506,14 +518,14 @@ async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, s
 async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text: return
     state = context.user_data.get('state')
-    if state == 'continuous_chat': await gpt_command(update, context); return
+    if state == 'continuous_chat': await gemini_command(update, context); return
     state = context.user_data.pop('state', None)
     if not state:
         await save_user_to_db(update, context, "Sent a message")
         return
     text = update.message.text
     state_handlers = {
-        'awaiting_gpt_prompt': lambda: gpt_command(update, context, prompt_text=text),
+        'awaiting_gemini_prompt': lambda: gemini_command(update, context, prompt_text=text),
         'awaiting_create_prompt': lambda: create_image_command(update, context, prompt=text),
         'awaiting_song_name': lambda: search_and_play_song(update, context, song_name=text),
         'awaiting_city': lambda: get_weather(update, context, city=text),
@@ -532,7 +544,7 @@ def main() -> None:
     # Command Handlers
     cmd_handlers = [
         CommandHandler("start", start), CommandHandler("help", help_command),
-        CommandHandler("gpt", gpt_command), CommandHandler("create", create_image_command),
+        CommandHandler("gemini", gemini_command), CommandHandler("create", create_image_command),
         CommandHandler("upscale", upscale_image_command), CommandHandler("animate", animate_command),
         CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
@@ -555,6 +567,7 @@ def main() -> None:
         "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
         "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
         "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
+        "Convert Video to Audio": lambda u,c: u.message.reply_text("To use this feature, please reply to a video with the /mp4 command."),
     }
     msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in menu_button_texts.items()]
 
