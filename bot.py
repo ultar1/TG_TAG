@@ -158,7 +158,7 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     keyboard = [
         [KeyboardButton("Weather"), KeyboardButton("Crypto Prices")],
         [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
-        [KeyboardButton("Convert Video to Audio")], # Added Button
+        [KeyboardButton("Ask a Riddle"), KeyboardButton("Convert Video to Audio")], # Added Riddle Button
         [KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -176,14 +176,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/upscale**: Reply to an image to improve its quality.\n"
         "**/summarize_file**: Reply to a PDF or image to summarize it.\n"
         "**/play <song name>**: Search and download a song or video.\n"
-        "**/mp4**: Reply to a video to convert it to an MP3 audio file."
+        "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
+        "**/riddle**: Get a random riddle."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, event_type="Started AI Chat")
     context.user_data['state'] = 'continuous_chat'
-    # Use gemini_history for Gemini's conversational memory
     context.user_data['gemini_history'] = []
     chat_keyboard = [[KeyboardButton("End Chat")]]
     reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
@@ -253,7 +253,6 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
         await feedback.edit_text("Content extracted. Summarizing with AI...")
         prompt = f"Please provide a concise but comprehensive summary of the following article text:\n\n{article_text[:15000]}"
         
-        # Call gemini_command to handle the API call
         ai_response = await asyncio.to_thread(gemini_model.generate_content, prompt)
         await feedback.edit_text(ai_response.text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -481,6 +480,22 @@ async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not response['error']: await update.message.reply_text(f"{response['setup']}\n\n...{response['delivery']}")
     except Exception: await update.message.reply_text("Sorry, couldn't get a joke.")
 
+async def get_riddle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches a random riddle and sends it to the user."""
+    try:
+        response = requests.get("https://riddles-api.vercel.app/random", timeout=7).json()
+        riddle = response.get('riddle')
+        answer = response.get('answer')
+        if not riddle or not answer:
+            await update.message.reply_text("Sorry, I couldn't think of a riddle right now.")
+            return
+        await update.message.reply_text(f"Here is your riddle:\n\n*_{riddle}_*", parse_mode=ParseMode.MARKDOWN)
+        await asyncio.sleep(8) 
+        await update.message.reply_text(f"**Answer:**\n||{escape_markdown(answer, version=2)}||", parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logger.error(f"Riddle API error: {e}")
+        await update.message.reply_text("Sorry, the riddle service is currently unavailable.")
+
 async def get_crypto_prices(update: Update, context: ContextTypes.DEFAULT_TYPE, crypto_ids: str) -> None:
     ids = ','.join(s.strip().lower() for s in crypto_ids.split(','))
     try:
@@ -548,6 +563,7 @@ def main() -> None:
         CommandHandler("upscale", upscale_image_command), CommandHandler("animate", animate_command),
         CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
+        CommandHandler("riddle", get_riddle), # Added Riddle command
     ]
     
     # Menu Button Handlers
@@ -556,6 +572,7 @@ def main() -> None:
         "Utilities": show_utilities_menu, "Help": help_command,
         "Back to Main Menu": start, "End Chat": end_chat,
         "Chat with AI": start_ai_chat, "Tell a Joke": get_joke,
+        "Ask a Riddle": get_riddle, # Added Riddle button
         "Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
         "Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
         "Upscale Image": lambda u,c: u.message.reply_text("Please reply to an image with /upscale."),
