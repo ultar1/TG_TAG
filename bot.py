@@ -20,6 +20,7 @@ import io # For OCR
 import smtplib
 from email.message import EmailMessage
 import shlex # For smart command parsing
+import re # Added for robust button handling
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -69,23 +70,15 @@ try:
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel('gemini-1.5-flash')
         logger.info("Gemini AI client configured.")
-    else:
-        gemini_model = None
-        logger.warning("GEMINI_API_KEY not found. AI commands will be disabled.")
-except Exception as e:
-    gemini_model = None
-    logger.error(f"Failed to configure Gemini API: {e}")
+    else: gemini_model = None; logger.warning("GEMINI_API_KEY not found.")
+except Exception as e: gemini_model = None; logger.error(f"Failed to configure Gemini API: {e}")
 
 try:
     if OPENAI_API_KEY:
         openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
         logger.info("OpenAI client configured for DALL-E.")
-    else:
-        openai_client = None
-        logger.warning("OPENAI_API_KEY not found. Image creation will be disabled.")
-except Exception as e:
-    openai_client = None
-    logger.error(f"Failed to configure OpenAI API: {e}")
+    else: openai_client = None; logger.warning("OPENAI_API_KEY not found.")
+except Exception as e: openai_client = None; logger.error(f"Failed to configure OpenAI API: {e}")
 
 
 # --- Constants & Database Setup ---
@@ -198,31 +191,23 @@ async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Chat ended. Returning to the main menu.")
     await start(update, context)
 
-# --- THIS FUNCTION WAS MISSING ---
 async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
     if not gemini_model:
         await update.message.reply_text("AI service is not configured.")
         return
-
     is_continuous_chat = context.user_data.get('state') == 'continuous_chat'
     history = context.user_data.get('gemini_history', []) if is_continuous_chat else []
-
     if not prompt_text:
         prompt_text = " ".join(context.args) if not is_continuous_chat else update.message.text
-    
     if not prompt_text:
         await update.message.reply_text("Please provide a prompt.")
         return
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    
     try:
         chat_session = gemini_model.start_chat(history=history)
         response = await asyncio.to_thread(chat_session.send_message, prompt_text)
-        
         if is_continuous_chat:
             context.user_data['gemini_history'] = chat_session.history
-        
         safe_reply = escape_markdown(response.text, version=2)
         await update.message.reply_text(safe_reply, parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
@@ -305,7 +290,6 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
 async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not gemini_model: await update.message.reply_text("AI service is not configured."); return
     if not update.message.reply_to_message: await update.message.reply_text("Please reply to an image or a PDF file with /summarize_file."); return
-    
     replied_message = update.message.reply_to_message
     feedback_message = await replied_message.reply_text("Processing file...")
     summary = ""
@@ -328,7 +312,6 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
             summary = response.text
         else:
             await feedback_message.edit_text("This command only works on an image or PDF file."); return
-
         await feedback_message.edit_text(f"**Summary:**\n\n{summary}", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"File summarization error: {e}")
@@ -338,7 +321,6 @@ async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not openai_client: await update.message.reply_text("Image generation service (OpenAI) is not configured."); return
     if not prompt: prompt = " ".join(context.args)
     if not prompt: await update.message.reply_text("Please describe the image you want to create."); return
-    
     feedback = await update.message.reply_text("Creating your image with DALL-E 3...")
     try:
         response = await openai_client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024", quality="standard")
@@ -472,12 +454,17 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([video_id])
         video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if file_size_mb > 49:
+            logger.warning(f"Video {video_id} is too large to upload: {file_size_mb:.2f} MB")
+            await query.edit_message_text("Sorry, this video is too large for me to send (over 50MB).")
+            return
         await query.edit_message_text("Sending video...")
         with open(video_path, 'rb') as video_file:
             await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
         await query.delete_message()
     except Exception as e:
-        logger.error(f"Video download error: {e}"); await query.edit_message_text("An error occurred.")
+        logger.error(f"Video download error: {e}"); await query.edit_message_text("An error occurred during the download.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
@@ -655,8 +642,11 @@ def main() -> None:
         "Take Screenshot": lambda u,c: prompt_for_input(u,c,'awaiting_screenshot_url', "Please enter the website URL to capture.","Pressed 'Take Screenshot'"),
         "Send Email (Admin)": gmail_command,
     }
-    msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{pattern}$"), func) for pattern, func in menu_button_texts.items()]
-
+    
+    # --- FIX for button handlers with special characters ---
+    escaped_patterns = [re.escape(p) for p in menu_button_texts.keys()]
+    msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(pattern)}$"), func) for pattern, func in menu_button_texts.items()]
+    
     callback_handlers = [
         CallbackQueryHandler(handle_play_confirmation, pattern="^play_confirm:"),
         CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"),
@@ -666,7 +656,8 @@ def main() -> None:
     ]
 
     application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(menu_button_texts.keys())})$"), record_user_message))
+    # --- FIX for the general message handler to ignore all button texts ---
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(escaped_patterns)})$"), record_user_message))
     
     PORT = int(os.environ.get("PORT", 8443))
     RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
