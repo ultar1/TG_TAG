@@ -169,9 +169,7 @@ async def read_text_from_image_command(update: Update, context: ContextTypes.DEF
              await feedback.edit_text("OCR processing failed. The Tesseract engine is not installed on the server.")
         else:
             await feedback.edit_text("Sorry, an error occurred while processing the image.")
-            
-## NEW ##
-# This function was missing but required for the "Translate Text" button to work
+
 async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_translate: str) -> None:
     if not gemini_model:
         await update.message.reply_text("Translate service is not configured.")
@@ -384,23 +382,24 @@ async def get_lyrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e: logger.error(f"Gemini lyrics fallback failed: {e}")
     await feedback.edit_text("Sorry, I couldn't find the lyrics for this song using any available method.")
 
-## NEW ##
-# This is the core function for the "Download Media" button.
-# It uses yt-dlp to download from almost any social media or video site URL.
-async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str) -> None:
-    feedback = await update.message.reply_text("Starting download...")
+async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str, platform: str) -> None:
+    feedback = await update.message.reply_text(f"Starting download from {platform}...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir, exist_ok=True)
     try:
-        # These are yt-dlp settings for downloading the best quality MP4 video
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
             'http_headers': {'User-Agent': 'Mozilla/5.0'}
         }
+        # Use specific cookie files for better results
+        if platform.lower() == 'youtube' and os.path.exists('cookies_youtube.txt'):
+            ydl_opts['cookiefile'] = 'cookies_youtube.txt'
+        elif os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             await feedback.edit_text("Downloading media from URL...")
             ydl.download([content_url])
@@ -414,19 +413,39 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         await feedback.edit_text("Download complete. Uploading to Telegram...")
         with open(downloaded_file_path, 'rb') as f:
             await context.bot.send_video(
-                chat_id=update.effective_chat.id,
-                video=f,
-                supports_streaming=True
+                chat_id=update.effective_chat.id, video=f, supports_streaming=True
             )
         await feedback.delete()
     except Exception as e:
         logger.error(f"Generic download error for {content_url}: {e}")
         await feedback.edit_text("Download failed. The link may be private, invalid, or from an unsupported site.")
     finally:
-        # This is crucial to clean up the files from the server
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
+# --- NEW DOWNLOAD FLOW FUNCTIONS ---
+async def show_download_platform_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a message with inline buttons for platform selection."""
+    await save_user_to_db(update, context, event_type="Pressed 'Download Media'")
+    keyboard = [
+        [InlineKeyboardButton("TikTok", callback_data="dl_platform:TikTok"), InlineKeyboardButton("Instagram", callback_data="dl_platform:Instagram")],
+        [InlineKeyboardButton("Facebook", callback_data="dl_platform:Facebook"), InlineKeyboardButton("YouTube", callback_data="dl_platform:YouTube")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Please choose a platform to download from:", reply_markup=reply_markup)
+
+async def handle_platform_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the user's platform choice and asks for the URL."""
+    query = update.callback_query
+    await query.answer()
+    platform_name = query.data.split(":")[1]
+    
+    # Set state to wait for the user's next message, which should be the URL
+    context.user_data['state'] = 'awaiting_download_url'
+    # Store the chosen platform to pass to the download function
+    context.user_data['platform'] = platform_name
+    
+    await query.edit_message_text(text=f"Okay, send me the full URL for the {platform_name} content.")
 
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -482,9 +501,9 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         'awaiting_crypto_symbols': lambda: get_crypto_prices(update, context, crypto_ids=text),
         'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
         'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
-        ## NEW ##
-        # This connects the state set by the "Download Media" button to the download function.
-        'awaiting_download_url': lambda: download_content_from_url(update, context, content_url=text),
+        'awaiting_download_url': lambda: download_content_from_url(
+            update, context, content_url=text, platform=context.user_data.pop('platform', 'unknown')
+        ),
     }
     if state in state_handlers: await state_handlers[state]()
 
@@ -504,9 +523,7 @@ def main() -> None:
         ("Help", help_command), ("Chat with AI", start_ai_chat), ("End Chat", end_chat),
         ("Read Text from Image", lambda u,c: u.message.reply_text("Please reply to an image with /readtext to extract text from it.")),
         ("Play Music / Video", lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video?","Pressed 'Play'")),
-        ## NEW ##
-        # This is the handler for the "Download Media" button.
-        ("Download Media", lambda u,c: prompt_for_input(u,c,'awaiting_download_url', "Please send the URL of the video you want to download.", "Pressed 'Download Media'")),
+        ("Download Media", show_download_platform_options), # MODIFIED
         ("Create Image", lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")),
         ("Weather", lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")),
         ("Crypto Prices", lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs (e.g., bitcoin).","Pressed 'Crypto'")),
@@ -518,6 +535,7 @@ def main() -> None:
         ("Summarize File", lambda u,c: u.message.reply_text("Reply to an image or PDF with /summarize_file."))
     ]]
     callback_handlers = [
+        CallbackQueryHandler(handle_platform_selection, pattern="^dl_platform:"), # NEW
         CallbackQueryHandler(lambda u,c: handle_play_confirmation(u,c,'audio'), pattern="^play_audio:"),
         CallbackQueryHandler(lambda u,c: handle_play_confirmation(u,c,'video'), pattern="^play_video:"),
         CallbackQueryHandler(show_quality_options_callback, pattern="^select_quality:"),
