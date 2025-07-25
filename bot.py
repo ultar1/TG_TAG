@@ -30,7 +30,7 @@ ADMIN_ID = 7302005705
 # --- Gemini API Configuration ---
 # ⚠️ WARNING: Do NOT hardcode your API key. Use environment variables.
 # I have replaced your key with a placeholder for your safety.
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY" # ⚠️ Replace with your new, secret Gemini API key
+GEMINI_API_KEY = "AIzaSyDsvDWz-lOhuGyQV5rL-uumbtlNamXqfWM" # ⚠️ Replace with your new, secret Gemini API key
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-pro')
