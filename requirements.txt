@@ -9,4 +9,5 @@ Pillow>=10.3.0
 pytesseract>=0.3.10
 sumy>=0.11.0
 nltk>=3.8.1
+requests
 
