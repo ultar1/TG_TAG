@@ -64,7 +64,7 @@ try: Base.metadata.create_all(engine)
 except OperationalError as e: logger.critical(f"Failed to connect to database: {e}. Exiting."); sys.exit(1)
 Session = sessionmaker(bind=engine)
 
-# --- Helper, Notification & DB Functions ---
+# --- Helper Functions ---
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
     user = update.effective_user
@@ -92,7 +92,7 @@ async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
-        [KeyboardButton("Play Music"), KeyboardButton("Download Media")],
+        [KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")],
         [KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -107,12 +107,11 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
-# --- Command Logic Functions ---
+# --- Command Logic ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await save_user_to_db(update, context, "Requested Help")
     help_text = (
         "**Here's how to use the bot:**\n\n"
-        "**Play Music**: Searches YouTube for a song.\n"
+        "**Play Music / Video**: Searches YouTube for a song or video.\n"
         "**Download Media**: Downloads video/audio from sites like TikTok, etc.\n"
         "**Chat with AI**: Talk to an AI for questions.\n"
         "**Create Image**: Generate an image from a text description.\n"
@@ -131,11 +130,7 @@ async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt
     if not prompt_text: await update.message.reply_text("Please provide a prompt."); return
     feedback = await update.message.reply_text("Thinking...")
     try:
-        response = await asyncio.to_thread(
-            openai_client.chat.completions.create,
-            model=GPT_MODEL,
-            messages=[{"role": "user", "content": prompt_text}]
-        )
+        response = await asyncio.to_thread(openai_client.chat.completions.create, model=GPT_MODEL, messages=[{"role": "user", "content": prompt_text}])
         await feedback.edit_text(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"OpenAI API error: {e}"); await feedback.edit_text("Sorry, an error occurred with the AI.")
@@ -145,13 +140,11 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     if not text_to_translate:
         args = context.args
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /translate <language> <text>\nExample: /translate Spanish Hello world"); return
+        if len(args) < 2: await update.message.reply_text("Usage: /translate <language> <text>"); return
         target_lang, text = args[0], " ".join(args[1:])
     else:
         parts = text_to_translate.split(" ", 1)
-        if len(parts) < 2:
-            await update.message.reply_text("Format: language text\nExample: Spanish Hello world"); return
+        if len(parts) < 2: await update.message.reply_text("Format: language text"); return
         target_lang, text = parts
 
     feedback = await update.message.reply_text(f"Translating to {target_lang}...")
@@ -214,7 +207,11 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     if not STABILITY_API_KEY: await update.message.reply_text("Image generation service not configured. (Missing STABILITY_API_KEY)."); return
     feedback = await update.message.reply_text("Creating your image...")
     try:
-        response = requests.post("https://api.stability.ai/v1/generation/stable-diffusion-v1-6/text-to-image", headers={"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}, json={"text_prompts": [{"text": prompt}]}, timeout=90)
+        # UPDATED MODEL ID
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        headers = {"Authorization": f"Bearer {STABILITY_API_KEY}", "Accept": "application/json"}
+        payload = {"text_prompts": [{"text": prompt}], "samples": 1, "width": 1024, "height": 1024}
+        response = requests.post(url, headers=headers, json=payload, timeout=90)
         response.raise_for_status()
         image_b64 = response.json()["artifacts"][0]["base64"]
         await context.bot.send_photo(chat_id=update.effective_chat.id, photo=base64.b64decode(image_b64), caption=f"Creation: `{prompt}`", parse_mode=ParseMode.MARKDOWN)
@@ -258,20 +255,27 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Animate command error: {e}"); await feedback.edit_text("Sorry, an error occurred while creating the animation.")
 
+# --- PLAY MUSIC / VIDEO FLOW ---
 async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
     feedback = await update.message.reply_text(f"Searching for '{song_name}'...")
     try:
-        ydl_opts = {'noplaylist': True, 'quiet': True}
-        if os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+        with yt_dlp.YoutubeDL({'noplaylist': True, 'quiet': True}) as ydl: info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
         if not info.get('entries'): await feedback.edit_text("Sorry, couldn't find any results."); return
         video_info = info['entries'][0]; title = video_info.get('title', 'Unknown Title'); video_id = video_info.get('id')
-        keyboard = [[InlineKeyboardButton("Yes, Download", callback_data=f"play_confirm:{video_id}"), InlineKeyboardButton("No, Cancel", callback_data="play_cancel")]]
-        await feedback.edit_text(f"I found: '{title}'.\n\nIs this the correct song?", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        # NEW: Buttons for both Audio and Video
+        keyboard = [
+            [
+                InlineKeyboardButton("Download Audio", callback_data=f"play_audio:{video_id}"),
+                InlineKeyboardButton("Download Video", callback_data=f"play_video:{video_id}")
+            ],
+            [InlineKeyboardButton("Cancel", callback_data="play_cancel")]
+        ]
+        await feedback.edit_text(f"I found: '{title}'.\n\nChoose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
-        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be rate-limiting or require a cookie file.")
+        logger.error(f"Play search error for '{song_name}': {e}"); await feedback.edit_text("An error occurred while searching. YouTube may be rate-limiting.")
 
-async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_play_audio_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
@@ -279,14 +283,33 @@ async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): audio_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(f"m.youtube.com{video_id}", download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
     except Exception as e:
-        logger.error(f"Play download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading. It might be due to YouTube rate-limiting.")
+        logger.error(f"Play audio download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading.")
+    finally:
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+
+async def handle_play_video_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query; await query.answer()
+    video_id = query.data.split(":")[1]
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
+    await query.edit_message_text("Downloading video...")
+    try:
+        video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True}
+        if os.path.exists('cookies_youtube.txt'): video_opts['cookiefile'] = 'cookies_youtube.txt'
+        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([f"youtu.be{video_id}"])
+        video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        await query.edit_message_text("Sending video...")
+        with open(video_path, 'rb') as video_file:
+            await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
+        await query.delete_message()
+    except Exception as e:
+        logger.error(f"Play video download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred while downloading.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
@@ -369,7 +392,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Back to Main Menu$"), start))
     
     # Sub-Menu Button Handlers
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song?","Pressed 'Play Music'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music / Video$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song?","Pressed 'Play'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Media$"), handle_keyboard_download_button))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Chat with AI$"), lambda u,c: prompt_for_input(u,c,'awaiting_gpt_prompt', "What's on your mind?","Pressed 'Chat with AI'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Create Image$"), lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")))
@@ -384,7 +407,8 @@ def main() -> None:
 
     # Callback Query Handlers
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^dl:"))
-    application.add_handler(CallbackQueryHandler(handle_play_confirmation, pattern="^play_confirm:"))
+    application.add_handler(CallbackQueryHandler(handle_play_audio_confirmation, pattern="^play_audio:"))
+    application.add_handler(CallbackQueryHandler(handle_play_video_confirmation, pattern="^play_video:"))
     application.add_handler(CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"))
 
     # General message handler
