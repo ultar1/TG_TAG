@@ -4,9 +4,6 @@ import sys
 import asyncio
 import uuid
 import shutil
-import datetime
-import time
-import io
 import requests
 import json
 from bs4 import BeautifulSoup
@@ -19,7 +16,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import OperationalError
+# ✅ FIX: Added missing IntegrityError for database operations
+from sqlalchemy.exc import OperationalError, IntegrityError
 from sqlalchemy.types import BigInteger
 import yt_dlp
 
@@ -72,12 +70,46 @@ except OperationalError as e: logger.critical(f"Failed to connect to database: {
 Session = sessionmaker(bind=engine)
 
 # --- Helper Functions ---
+# ✅ FIX: Implemented the full database saving and notification logic
 async def save_user_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE, event_type: str = "User Interacted"):
     if not hasattr(update, 'effective_user') or not update.effective_user: return
     user = update.effective_user
-    if user.id == ADMIN_ID: return
-    # Full DB and notification logic can be expanded here.
-    pass
+    chat_id = update.effective_chat.id
+
+    session = Session()
+    try:
+        existing_user = session.query(User).filter_by(user_id=user.id, chat_id=chat_id).first()
+        user_info = {'user_id': user.id, 'first_name': user.first_name, 'username': user.username}
+
+        if not existing_user:
+            new_user = User(user_id=user.id, first_name=user.first_name, username=user.username, chat_id=chat_id)
+            session.add(new_user)
+            session.commit()
+            if user.id != ADMIN_ID:
+                await send_notification_to_admin(context, user_info, "New User Added")
+        else:
+             if user.id != ADMIN_ID:
+                await send_notification_to_admin(context, user_info, event_type)
+    except IntegrityError:
+        session.rollback()
+    except Exception as e:
+        logger.error(f"DB Error for user {user.id}: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+async def send_notification_to_admin(context: ContextTypes.DEFAULT_TYPE, user_info: dict, event_type: str):
+    first_name = user_info.get('first_name', 'N/A')
+    username = f"@{user_info.get('username')}" if user_info.get('username') else "Not set"
+    message = (
+        f"Interaction: {event_type}\n"
+        f"User: {first_name} (ID: `{user_info.get('user_id')}`)\n"
+        f"Username: {username}"
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Failed to send admin notification: {e}")
 
 # --- MAIN MENU & SUB-MENUS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -85,7 +117,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [KeyboardButton("AI Tools"), KeyboardButton("Media Tools")],
         [KeyboardButton("Utilities"), KeyboardButton("Help")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text("Main Menu:", reply_markup=reply_markup)
 
 async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -95,7 +127,7 @@ async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [KeyboardButton("Summarize Link"), KeyboardButton("Summarize File")],
         [KeyboardButton("Back to Main Menu")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
 
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,7 +135,7 @@ async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TY
         [KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")],
         [KeyboardButton("Back to Main Menu")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
 
 async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,7 +144,7 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
         [KeyboardButton("Back to Main Menu")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
 # --- Command Logic Functions ---
@@ -134,12 +166,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ✅ FIX: Modified function to accept text from buttons OR /gemini command
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
     if not gemini_model:
         await update.message.reply_text("AI service is not configured (Missing GEMINI_API_KEY).")
         return
 
-    prompt = " ".join(context.args)
+    prompt = prompt_text if prompt_text is not None else " ".join(context.args)
     replied_message = update.message.reply_to_message
     image_parts = []
 
@@ -337,13 +370,14 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_play_audio_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]; url = f"m.youtube.com{video_id}"
+    video_id = query.data.split(":")[1]
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Downloading audio...")
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): audio_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(url, download=True)
+        # ✅ FIX: Using the video_id directly is the most reliable way.
+        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
@@ -356,13 +390,14 @@ async def handle_play_audio_confirmation(update: Update, context: ContextTypes.D
 
 async def handle_play_video_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]; url = f"youtu.be{video_id}"
+    video_id = query.data.split(":")[1]
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Downloading video...")
     try:
         video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True}
         if os.path.exists('cookies_youtube.txt'): video_opts['cookiefile'] = 'cookies_youtube.txt'
-        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([url])
+        # ✅ FIX: Using the video_id directly is the most reliable way.
+        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([video_id])
         video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await query.edit_message_text("Sending video...")
         with open(video_path, 'rb') as video_file:
@@ -425,23 +460,31 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not update.message or not update.message.text: return
     state = context.user_data.pop('state', None)
+    
+    # Using a dictionary to map states to their handler functions
     state_handlers = {
-        'awaiting_song_name': search_and_play_song,
+        'awaiting_song_name': lambda u, c, t: search_and_play_song(u, c, song_name=t),
         'awaiting_url': lambda u, c, t: download_content_from_url(u, c, c.user_data.pop('platform'), t),
-        'awaiting_gemini_prompt': lambda u, c, t: gemini_command(u,c, prompt_text=t),
-        'awaiting_imagine_prompt': generate_image,
-        'awaiting_city': get_weather,
-        'awaiting_crypto_symbols': get_crypto_prices,
-        'awaiting_summary_url': summarize_url,
-        'awaiting_translation_text': lambda u,c,t: translate_command(u,c,text_to_translate=t)
+        'awaiting_gemini_prompt': lambda u, c, t: gemini_command(u, c, prompt_text=t),
+        'awaiting_imagine_prompt': lambda u, c, t: generate_image(u, c, prompt=t),
+        'awaiting_city': lambda u, c, t: get_weather(u, c, city=t),
+        'awaiting_crypto_symbols': lambda u, c, t: get_crypto_prices(u, c, crypto_ids=t),
+        'awaiting_summary_url': lambda u, c, t: summarize_url(u, c, url=t),
+        'awaiting_translation_text': lambda u, c, t: translate_command(u, c, text_to_translate=t)
     }
+    
     handler = state_handlers.get(state)
-    if handler: await handler(update, context, update.message.text)
-    else: await save_user_to_db(update, context)
+    if handler:
+        await handler(update, context, update.message.text)
+    else:
+        # Default behavior for any text not matching a state
+        await save_user_to_db(update, context, "Sent a message")
+
 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
-    # Command Handlers
+    
+    # Command Handlers for direct commands like /start
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("upscale", upscale_image_command))
@@ -450,37 +493,37 @@ def main() -> None:
     application.add_handler(CommandHandler("summarize_file", summarize_file_command))
     application.add_handler(CommandHandler("gemini", gemini_command))
 
-    # Main Menu Handlers
+    # Message Handlers for the main menu buttons
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^AI Tools$"), show_ai_tools_menu))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Media Tools$"), show_media_tools_menu))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Utilities$"), show_utilities_menu))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Back to Main Menu$"), start))
     
-    # Sub-Menu Button Handlers
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music / Video$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song?","Pressed 'Play'")))
+    # Message Handlers for sub-menu buttons that prompt for user input
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Play Music / Video$"), lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like to search for?","Pressed 'Play'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Download Media$"), handle_keyboard_download_button))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Chat with AI$"), lambda u,c: prompt_for_input(u,c,'awaiting_gemini_prompt', "What's on your mind?","Pressed 'Chat with AI'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Create Image$"), lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image.","Pressed 'Create Image'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Animate Image$"), lambda u,c: u.message.reply_text("Reply to an image with /animate.")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Upscale Image$"), lambda u,c: u.message.reply_text("Reply to an image with /upscale.")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Weather$"), lambda u,c: prompt_for_input(u,c,'awaiting_city', "Enter a city name.","Pressed 'Weather'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Crypto Prices$"), lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs from CoinGecko (e.g., bitcoin).","Pressed 'Crypto'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Chat with AI$"), lambda u,c: prompt_for_input(u,c,'awaiting_gemini_prompt', "What's on your mind? You can also reply to an image.","Pressed 'Chat with AI'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Create Image$"), lambda u,c: prompt_for_input(u,c,'awaiting_imagine_prompt', "Describe the image you want to create.","Pressed 'Create Image'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Animate Image$"), lambda u,c: u.message.reply_text("Please reply to an image with the /animate command.")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Upscale Image$"), lambda u,c: u.message.reply_text("Please reply to an image with the /upscale command.")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Weather$"), lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Crypto Prices$"), lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Tell a Joke$"), get_joke))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize Link$"), lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Send the article link.","Pressed 'Summarize'")))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize File$"), lambda u,c: u.message.reply_text("Reply to an image or PDF with /summarize_file.")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize Link$"), lambda u,c: prompt_for_input(u,c,'awaiting_summary_url', "Please send the full article link.","Pressed 'Summarize Link'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Summarize File$"), lambda u,c: u.message.reply_text("Please reply to an image or a PDF file with the /summarize_file command.")))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Help$"), help_command))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Translate Text$"), lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Format: language text (e.g., Spanish Hello)","Pressed 'Translate'")))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Translate Text$"), lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Please enter the text to translate in the format: language text (e.g., Spanish Hello world)","Pressed 'Translate'")))
 
-    # Callback Query Handlers
+    # Callback Query Handlers for inline buttons (like download options)
     application.add_handler(CallbackQueryHandler(handle_download_platform_selection, pattern="^dl:"))
     application.add_handler(CallbackQueryHandler(handle_play_audio_confirmation, pattern="^play_audio:"))
     application.add_handler(CallbackQueryHandler(handle_play_video_confirmation, pattern="^play_video:"))
     application.add_handler(CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"))
 
-    # General message handler
+    # General message handler to process user input after a prompt
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_user_message))
     
-    # Webhook setup
+    # Webhook setup for deployment
     PORT = int(os.environ.get("PORT", 8443))
     RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
     if not RENDER_APP_NAME:
