@@ -192,13 +192,13 @@ async def summarize_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             You are an expert analyst. Your task is to provide a detailed, structured summary of the following text.
             Structure your response with the following sections, using Markdown for formatting:
             
-            **🔑 Key Takeaways:**
+            **Key Takeaways:**
             - (A bulleted list of the 3-5 most crucial points)
 
-            **📝 Detailed Summary:**
+            **Detailed Summary:**
             - (A comprehensive paragraph explaining the main narrative, arguments, and conclusions)
 
-            **🤔 Critical Analysis/Context:**
+            **Critical Analysis/Context:**
             - (Provide deeper insights, potential implications, or the 'so what?' of the article)
 
             Here is the text to analyze:
@@ -239,13 +239,13 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
             You are an expert analyst. Your task is to provide a detailed, structured summary of the following document.
             Structure your response with the following sections, using Markdown for formatting:
             
-            **🔑 Key Takeaways:**
+            **Key Takeaways:**
             - (A bulleted list of the 3-5 most crucial points)
 
-            **📝 Detailed Summary:**
+            **Detailed Summary:**
             - (A comprehensive paragraph explaining the main narrative, arguments, and conclusions)
 
-            **🤔 Critical Analysis/Context:**
+            **Critical Analysis/Context:**
             - (Provide deeper insights, potential implications, or context from the document)
 
             Here is the document text to analyze:
