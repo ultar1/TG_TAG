@@ -485,6 +485,162 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
 
+async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
+    if not query:
+        if not context.args:
+            await update.message.reply_text("Please provide a search term.")
+            return
+        query = " ".join(context.args)
+        await ask_for_tiktok_count(update, context, query)
+        return
+    feedback = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Searching TikTok for '{query}'...")
+    try:
+        api_url = 'https://tikwm.com/api/feed/search'
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Cookie": "current_language=en", "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"}
+        data = {'keywords': query, 'count': '20'}
+        response = requests.post(api_url, headers=headers, data=data, timeout=20)
+        response.raise_for_status()
+        videos = response.json().get('data', {}).get('videos', [])
+        if not videos:
+            await feedback.edit_text("No TikTok videos found for that search.")
+            return
+        await feedback.edit_text(f"Found {len(videos)} videos. Sending {count} of them...")
+        random.shuffle(videos)
+        for video in videos[:count]:
+            video_url, caption = video.get('play'), video.get('title', 'No caption')
+            if video_url:
+                try:
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=video_url, caption=caption, read_timeout=60, write_timeout=60)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.error(f"Failed to send TikTok video {video_url}: {e}")
+                    await context.bot.send_message(update.effective_chat.id, f"Could not send one of the videos.")
+    except Exception as e:
+        logger.error(f"TikTok search failed: {e}")
+        await feedback.edit_text("An unexpected error occurred.")
+
+async def ask_for_tiktok_count(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+    context.user_data['tiktok_query'] = query
+    keyboard = [[
+        InlineKeyboardButton("3 Videos", callback_data="tiktok_count:3"),
+        InlineKeyboardButton("5 Videos", callback_data="tiktok_count:5"),
+        InlineKeyboardButton("10 Videos", callback_data="tiktok_count:10")
+    ]]
+    await update.message.reply_text(f"How many videos for '{query}' would you like?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    count = int(query.data.split(":")[1])
+    search_query = context.user_data.pop('tiktok_query', None)
+    if not search_query:
+        await query.edit_message_text("Sorry, your search expired. Please try again.")
+        return
+    await query.edit_message_text("Great! Starting your search...")
+    await tiktok_search_command(query, context, query=search_query, count=count)
+
+async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
+    if not query:
+        if not context.args:
+            await update.message.reply_text("Please provide a search term. Usage: `/ytsearch <query>`")
+            return
+        query = " ".join(context.args)
+    feedback = await update.message.reply_text(f"Searching YouTube for '{query}'...")
+    try:
+        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch5'}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+        if not info.get('entries'):
+            await feedback.edit_text("Sorry, couldn't find any results."); return
+        keyboard = []
+        for video in info['entries']:
+            title, video_id = video.get('title', 'Unknown Title'), video.get('id')
+            button_text = (title[:60] + '..') if len(title) > 60 else title
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"play_confirm:{video_id}")])
+        await feedback.edit_text("Here are the top 5 results:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"Youtube error: {e}")
+        await feedback.edit_text("An error occurred during the search.")
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    song_name = " ".join(context.args)
+    if not song_name:
+        await update.message.reply_text("Please provide a song name, e.g., `/play Burna Boy - Last Last`")
+        return
+    await search_and_play_song(update, context, song_name)
+
+async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
+    message_to_reply_to = update.callback_query.message if update.callback_query else update.message
+    feedback = await message_to_reply_to.reply_text(f"Searching for '{song_name}'...")
+    try:
+        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1', 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(song_name, download=False)
+        if not info.get('entries'):
+            await feedback.edit_text("Sorry, couldn't find any results."); return
+        video = info['entries'][0]
+        title, video_id = video.get('title', 'Unknown Title'), video.get('id')
+        keyboard = [[InlineKeyboardButton("Yes, that's it!", callback_data=f"play_confirm:{video_id}")], [InlineKeyboardButton("No, cancel", callback_data="play_cancel")]]
+        await feedback.edit_text(f"I found: **{title}**\n\nIs this correct?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Play search error: {e}")
+        await feedback.edit_text("An error occurred while searching. YouTube may be blocking requests.")
+
+async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query; await query.answer()
+    video_id = query.data.split(":")[1]
+    keyboard = [[InlineKeyboardButton("Audio", callback_data=f"dl_audio:{video_id}"), InlineKeyboardButton("Video", callback_data=f"dl_video:{video_id}")]]
+    await query.edit_message_text("Choose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query; await query.answer()
+    video_id = query.data.split(":")[1]
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
+    await query.edit_message_text("Downloading audio...")
+    try:
+        audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
+        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
+        audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        await query.edit_message_text("Sending audio...")
+        with open(audio_path, 'rb') as audio_file:
+            await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
+        await query.delete_message()
+    except Exception as e:
+        logger.error(f"Audio download error: {e}"); await query.edit_message_text("An error occurred.")
+    finally:
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+
+async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query; await query.answer()
+    video_id = query.data.split(":")[1]
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
+    await query.edit_message_text("Checking video details...")
+    try:
+        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(video_id, download=False)
+        filesize = info.get('filesize') or info.get('filesize_approx', 0)
+        file_size_mb = filesize / (1024 * 1024)
+        if file_size_mb <= 49:
+            await query.edit_message_text(f"Downloading video ({file_size_mb:.2f} MB)...")
+            ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
+            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl: ydl_dl.download([video_id])
+            video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+            await query.edit_message_text("Sending video...")
+            with open(video_path, 'rb') as video_file:
+                await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
+            await query.delete_message()
+        else:
+            video_url = info.get('url')
+            if video_url:
+                keyboard = [[InlineKeyboardButton("Download Full Video (Direct Link)", url=video_url)]]
+                await query.edit_message_text(f"This video is too large to send ({file_size_mb:.2f} MB).\n\nYou can download it directly using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await query.edit_message_text("The video is too large and I couldn't get a direct download link.")
+    except Exception as e:
+        logger.error(f"Video download error for ID {video_id}: {e}")
+        await query.edit_message_text("An error occurred during the download process.")
+    finally:
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     await query.edit_message_text("Search cancelled.")
@@ -593,7 +749,8 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Step 3 of 3: Perfect. Please enter the message body.")
         return
     elif popped_state == 'awaiting_email_body':
-        to_address, subject = context.user_data.pop('email_to', 'N/A'), context.user_data.pop('email_subject', 'N/A')
+        to_address = context.user_data.pop('email_to', 'N/A')
+        subject = context.user_data.pop('email_subject', 'N/A')
         feedback = await update.message.reply_text(f"Sending email to {to_address}...")
         msg = EmailMessage(); msg.set_content(text); msg['Subject'] = subject; msg['From'] = os.environ.get("GMAIL_ADDRESS"); msg['To'] = to_address
         def send_email_sync():
@@ -626,6 +783,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         'awaiting_ytsearch_query': lambda: Youtube_command(update, context, query=text),
         'awaiting_suggestion': lambda: handle_suggestion(update, context, suggestion=text)
     }
+    
     if popped_state in state_handlers: await state_handlers[popped_state]()
 
 async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, suggestion: str):
