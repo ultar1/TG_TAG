@@ -486,14 +486,18 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
             os.remove(temp_audio_path)
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
+    # This determines which chat to send the message to, works for both commands and callbacks
+    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat.id
+
     if not query:
         if not context.args:
-            await update.message.reply_text("Please provide a search term.")
+            await context.bot.send_message(chat_id, "Please provide a search term.")
             return
         query = " ".join(context.args)
         await ask_for_tiktok_count(update, context, query)
         return
-    feedback = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Searching TikTok for '{query}'...")
+    
+    feedback = await context.bot.send_message(chat_id=chat_id, text=f"Searching TikTok for '{query}'...")
     try:
         api_url = 'https://tikwm.com/api/feed/search'
         headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Cookie": "current_language=en", "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"}
@@ -501,20 +505,23 @@ async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         response = requests.post(api_url, headers=headers, data=data, timeout=20)
         response.raise_for_status()
         videos = response.json().get('data', {}).get('videos', [])
+        
         if not videos:
             await feedback.edit_text("No TikTok videos found for that search.")
             return
+            
         await feedback.edit_text(f"Found {len(videos)} videos. Sending {count} of them...")
         random.shuffle(videos)
+        
         for video in videos[:count]:
             video_url, caption = video.get('play'), video.get('title', 'No caption')
             if video_url:
                 try:
-                    await context.bot.send_video(chat_id=update.effective_chat.id, video=video_url, caption=caption, read_timeout=60, write_timeout=60)
+                    await context.bot.send_video(chat_id=chat_id, video=video_url, caption=caption, read_timeout=60, write_timeout=60)
                     await asyncio.sleep(1)
                 except Exception as e:
                     logger.error(f"Failed to send TikTok video {video_url}: {e}")
-                    await context.bot.send_message(update.effective_chat.id, f"Could not send one of the videos.")
+                    await context.bot.send_message(chat_id, f"Could not send one of the videos.")
     except Exception as e:
         logger.error(f"TikTok search failed: {e}")
         await feedback.edit_text("An unexpected error occurred.")
@@ -537,6 +544,7 @@ async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Sorry, your search expired. Please try again.")
         return
     await query.edit_message_text("Great! Starting your search...")
+    # Pass the callback_query object as the 'update' parameter
     await tiktok_search_command(query, context, query=search_query, count=count)
 
 async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
@@ -547,7 +555,12 @@ async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
         query = " ".join(context.args)
     feedback = await update.message.reply_text(f"Searching YouTube for '{query}'...")
     try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch5'}
+        ydl_opts = {
+            'noplaylist': True,
+            'quiet': True,
+            'default_search': 'ytsearch5',
+            'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
         if not info.get('entries'):
@@ -560,7 +573,7 @@ async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
         await feedback.edit_text("Here are the top 5 results:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Youtube error: {e}")
-        await feedback.edit_text("An error occurred during the search.")
+        await feedback.edit_text("An error occurred during the search. Make sure your `cookies_youtube.txt` is valid.")
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     song_name = " ".join(context.args)
@@ -615,7 +628,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Checking video details...")
     try:
-        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True}
+        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(video_id, download=False)
         filesize = info.get('filesize') or info.get('filesize_approx', 0)
         file_size_mb = filesize / (1024 * 1024)
