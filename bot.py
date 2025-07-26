@@ -21,9 +21,8 @@ import smtplib
 from email.message import EmailMessage
 import shlex # For smart command parsing
 import re # For robust button handling
-from pydub import AudioSegment
 from gtts import gTTS
-import random # For shuffling TikTok results
+import random
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -60,7 +59,6 @@ STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 SCREENSHOT_API_KEY = os.environ.get("SCREENSHOT_API_KEY")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY") # For Shazam
 
 # --- Initial Checks ---
 if not all([BOT_TOKEN, DATABASE_URL, ADMIN_ID]):
@@ -151,8 +149,7 @@ async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = [
         [KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")],
         [KeyboardButton("Search TikTok"), KeyboardButton("Youtube")],
-        [KeyboardButton("Search Movie"), KeyboardButton("Find Music")],
-        [KeyboardButton("Back to Main Menu")]
+        [KeyboardButton("Search Movie"), KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
@@ -171,153 +168,6 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Utilities:", reply_markup=reply_markup)
 
 # --- Feature Functions ---
-# ... (All your existing feature functions like help, gmail, etc. are here)
-# ... I am omitting them for brevity but they are in the final code block.
-
-# --- NEW TIKTOK SEARCH COMMAND ---
-async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    if not query:
-        # This part is for direct command usage like /tiktoksearch cats
-        if not context.args:
-            await update.message.reply_text("Please provide a search term.")
-            return
-        query = " ".join(context.args)
-        # If called directly, ask for count
-        await ask_for_tiktok_count(update, context, query)
-        return
-
-    # This part is called by the callback handler after user selects a count
-    feedback = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Searching TikTok for '{query}'...")
-    try:
-        api_url = 'https://tikwm.com/api/feed/search'
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Cookie": "current_language=en",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
-        }
-        data = {'keywords': query, 'count': '20'} # Fetch more to have a better random selection
-        response = requests.post(api_url, headers=headers, data=data, timeout=20)
-        response.raise_for_status()
-        videos = response.json().get('data', {}).get('videos', [])
-        
-        if not videos:
-            await feedback.edit_text("No TikTok videos found for that search.")
-            return
-            
-        await feedback.edit_text(f"Found {len(videos)} videos. Sending {count} of them...")
-        random.shuffle(videos)
-        
-        for video in videos[:count]:
-            video_url = video.get('play')
-            caption = video.get('title', 'No caption')
-            if video_url:
-                try:
-                    await context.bot.send_video(chat_id=update.effective_chat.id, video=video_url, caption=caption, read_timeout=60, write_timeout=60)
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logger.error(f"Failed to send TikTok video {video_url}: {e}")
-                    await context.bot.send_message(update.effective_chat.id, f"Could not send one of the videos.")
-    except Exception as e:
-        logger.error(f"TikTok search failed: {e}")
-        await feedback.edit_text("An unexpected error occurred.")
-
-
-async def ask_for_tiktok_count(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
-    context.user_data['tiktok_query'] = query
-    keyboard = [[
-        InlineKeyboardButton("3 Videos", callback_data="tiktok_count:3"),
-        InlineKeyboardButton("5 Videos", callback_data="tiktok_count:5"),
-        InlineKeyboardButton("10 Videos", callback_data="tiktok_count:10")
-    ]]
-    await update.message.reply_text(f"How many videos for '{query}' would you like?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    count = int(query.data.split(":")[1])
-    search_query = context.user_data.pop('tiktok_query', None)
-    
-    if not search_query:
-        await query.edit_message_text("Sorry, your search expired. Please try again.")
-        return
-        
-    await query.edit_message_text("Great! Starting your search...")
-    await tiktok_search_command(query, context, query=search_query, count=count)
-
-
-# --- NEW Youtube COMMAND ---
-async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
-    if not query:
-        if not context.args:
-            await update.message.reply_text("Please provide a search term. Usage: `/ytsearch <query>`")
-            return
-        query = " ".join(context.args)
-
-    feedback = await update.message.reply_text(f"Searching YouTube for '{query}'...")
-    try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch5'}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-        
-        if not info.get('entries'):
-            await feedback.edit_text("Sorry, couldn't find any results."); return
-
-        keyboard = []
-        for video in info['entries']:
-            title = video.get('title', 'Unknown Title')
-            video_id = video.get('id')
-            # Truncate title to fit on a button
-            button_text = (title[:60] + '..') if len(title) > 60 else title
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"play_confirm:{video_id}")])
-        
-        await feedback.edit_text("Here are the top 5 results:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    except Exception as e:
-        logger.error(f"Youtube error: {e}")
-        await feedback.edit_text("An error occurred during the search.")
-
-# --- FIXED VIDEO DOWNLOAD HANDLER ---
-async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
-    await query.edit_message_text("Checking video details...")
-    try:
-        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_id, download=False)
-
-        # Get the filesize from the metadata before downloading
-        filesize = info.get('filesize') or info.get('filesize_approx', 0)
-        file_size_mb = filesize / (1024 * 1024)
-
-        if file_size_mb <= 49:
-            # File is small enough, proceed with download and send
-            await query.edit_message_text(f"Downloading video ({file_size_mb:.2f} MB)...")
-            ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
-            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl:
-                ydl_dl.download([video_id])
-            video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-            await query.edit_message_text("Sending video...")
-            with open(video_path, 'rb') as video_file:
-                await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
-            await query.delete_message()
-        else:
-            # File is too large, send direct link instead
-            video_url = info.get('url')
-            if video_url:
-                keyboard = [[InlineKeyboardButton("Download Full Video (Direct Link)", url=video_url)]]
-                await query.edit_message_text(f"This video is too large to send ({file_size_mb:.2f} MB).\n\nYou can download it directly using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
-            else:
-                await query.edit_message_text("The video is too large and I couldn't get a direct download link.")
-    except Exception as e:
-        logger.error(f"Video download error for ID {video_id}: {e}")
-        await query.edit_message_text("An error occurred during the download process.")
-    finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-
-# --- Full Code (pasting all other functions for completeness) ---
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "**Bot Commands Guide:**\n\n"
@@ -328,12 +178,48 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/tiktoksearch <query>**: Search for TikTok videos.\n"
         "**/ytsearch <query>**: Search for YouTube videos.\n"
         "**/play <song name>**: Search and download a song or video.\n"
-        "**/find**: Reply to audio/video to identify the song.\n"
         "**/tts <text>**: Convert text to speech.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
         "**/gmail**: Send an email (Admin only)."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await save_user_to_db(update, context, event_type="Started AI Chat")
+    context.user_data['state'] = 'continuous_chat'
+    context.user_data['gemini_history'] = []
+    chat_keyboard = [[KeyboardButton("End Chat")]]
+    reply_markup = ReplyKeyboardMarkup(chat_keyboard, resize_keyboard=True)
+    await update.message.reply_text("You are now in a continuous chat with the AI.\n\nSend your message, or press 'End Chat' to return to the main menu.", reply_markup=reply_markup)
+
+async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop('state', None)
+    context.user_data.pop('gemini_history', None)
+    await update.message.reply_text("Chat ended. Returning to the main menu.")
+    await start(update, context)
+
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_text: str = None) -> None:
+    if not gemini_model:
+        await update.message.reply_text("AI service is not configured.")
+        return
+    is_continuous_chat = context.user_data.get('state') == 'continuous_chat'
+    history = context.user_data.get('gemini_history', []) if is_continuous_chat else []
+    if not prompt_text:
+        prompt_text = " ".join(context.args) if not is_continuous_chat else update.message.text
+    if not prompt_text:
+        await update.message.reply_text("Please provide a prompt.")
+        return
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    try:
+        chat_session = gemini_model.start_chat(history=history)
+        response = await asyncio.to_thread(chat_session.send_message, prompt_text)
+        if is_continuous_chat:
+            context.user_data['gemini_history'] = chat_session.history
+        safe_reply = escape_markdown(response.text, version=2)
+        await update.message.reply_text(safe_reply, parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logger.error(f"Gemini command error: {e}")
+        await update.message.reply_text("Sorry, an error occurred with the AI. The response may contain formatting I can't send.")
 
 async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
@@ -344,6 +230,85 @@ async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     context.user_data['state'] = 'awaiting_email_address'
     await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.")
+
+async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str = None) -> None:
+    if not TMDB_API_KEY:
+        await update.message.reply_text("Movie search service is not configured.")
+        return
+    if not title:
+        if not context.args:
+            await update.message.reply_text("Please provide a movie title. Usage: `/movie The Matrix`")
+            return
+        title = " ".join(context.args)
+    feedback = await update.message.reply_text(f"Searching for '{title}'...")
+    try:
+        search_url = f"https://api.themoviedb.org/3/search/movie"
+        search_params = {"api_key": TMDB_API_KEY, "query": title}
+        response = requests.get(search_url, params=search_params, timeout=10)
+        response.raise_for_status()
+        search_results = response.json()
+        if not search_results['results']:
+            await feedback.edit_text("Sorry, I couldn't find any movie with that title.")
+            return
+        movie_id = search_results['results'][0]['id']
+        details_url = f"https://api.themoviedb.org/3/movie/{movie_id}"
+        details_params = {"api_key": TMDB_API_KEY}
+        response = requests.get(details_url, params=details_params, timeout=10)
+        response.raise_for_status()
+        details = response.json()
+        movie_title = details.get('title', 'N/A')
+        release_year = details.get('release_date', '----').split('-')[0]
+        rating = f"{details.get('vote_average', 0):.1f}/10"
+        overview = details.get('overview', 'No summary available.')
+        genres = ", ".join([genre['name'] for genre in details.get('genres', [])])
+        poster_path = details.get('poster_path')
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+        caption = (
+            f"🎬 *{escape_markdown(movie_title, version=2)} ({release_year})*\n\n"
+            f"⭐ *Rating:* {rating}\n"
+            f"🎭 *Genres:* {genres}\n\n"
+            f"_{escape_markdown(overview, version=2)}_"
+        )
+        if poster_url:
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=poster_url, caption=caption, parse_mode=ParseMode.MARKDOWN_V2)
+            await feedback.delete()
+        else:
+            await feedback.edit_text(caption, parse_mode=ParseMode.MARKDOWN_V2)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"TMDb API request failed: {e}")
+        await feedback.edit_text("An error occurred while contacting the movie database.")
+    except Exception as e:
+        logger.error(f"Movie command failed: {e}")
+        await feedback.edit_text("An unexpected error occurred.")
+
+async def screenshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str = None) -> None:
+    if not SCREENSHOT_API_KEY:
+        await update.message.reply_text("Screenshot service is not configured.")
+        return
+    if not url:
+        if not context.args:
+            await update.message.reply_text("Please provide a URL. Usage: `/screenshot google.com`")
+            return
+        url = context.args[0]
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'http://' + url
+    feedback = await update.message.reply_text(f"Capturing screenshot for `{url}`...", parse_mode=ParseMode.MARKDOWN)
+    try:
+        api_url = "https://shot.screenshotapi.net/screenshot"
+        params = {"token": SCREENSHOT_API_KEY, "url": url, "full_page": "false", "fresh": "true", "output": "image", "file_type": "png", "wait_for_event": "load"}
+        response = requests.get(api_url, params=params, timeout=45)
+        if response.status_code == 200:
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=response.content, caption=f"Screenshot of `{url}`", parse_mode=ParseMode.MARKDOWN)
+            await feedback.delete()
+        else:
+            logger.error(f"Screenshot API failed with status {response.status_code}: {response.text}")
+            await feedback.edit_text("Sorry, failed to capture the screenshot. The URL may be invalid or the service is down.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Screenshot request failed: {e}")
+        await feedback.edit_text("An error occurred while trying to reach the screenshot service.")
+    except Exception as e:
+        logger.error(f"Screenshot command failed: {e}")
+        await feedback.edit_text("An unexpected error occurred.")
 
 async def read_text_from_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
@@ -520,106 +485,6 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
 
-async def find_music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not RAPIDAPI_KEY:
-        await update.message.reply_text("Music recognition service is not configured.")
-        return
-    replied_message = update.message.reply_to_message
-    if not replied_message or (not replied_message.audio and not replied_message.video):
-        await update.message.reply_text("Please reply to an audio or video file with /find to identify the music.")
-        return
-    feedback = await update.message.reply_text("Listening to the audio...")
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir, exist_ok=True)
-    try:
-        if replied_message.audio: media_file = await replied_message.audio.get_file()
-        else: media_file = await replied_message.video.get_file()
-        original_path = os.path.join(temp_dir, media_file.file_id)
-        await media_file.download_to_drive(original_path)
-        await feedback.edit_text("Extracting audio sample...")
-        audio = AudioSegment.from_file(original_path)
-        audio = audio.set_channels(1).set_frame_rate(44100)
-        start_time = (len(audio) / 2) - 7500
-        end_time = start_time + 15000
-        if start_time < 0: start_time = 0
-        if end_time > len(audio): end_time = len(audio)
-        sample = audio[start_time:end_time]
-        buffered = io.BytesIO()
-        sample.export(buffered, format="raw")
-        encoded_string = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        await feedback.edit_text("Identifying song...")
-        url = "https://shazam.p.rapidapi.com/songs/detect"
-        payload = encoded_string
-        headers = {"content-type": "text/plain", "X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": "shazam.p.rapidapi.com"}
-        response = requests.post(url, data=payload, headers=headers, timeout=20)
-        if response.status_code != 200 or not response.json().get('track'):
-            await feedback.edit_text("Sorry, I couldn't identify this song.")
-            return
-        track_info = response.json()['track']
-        title = track_info.get('title', 'Unknown Title')
-        subtitle = track_info.get('subtitle', 'Unknown Artist')
-        search_query = f"{title} {subtitle}"
-        keyboard = [[InlineKeyboardButton(f"Download '{title}'", callback_data=f"find_dl:{search_query}")]]
-        await feedback.edit_text(f"I found it!\n\nSong: *{escape_markdown(title, version=2)}*\nArtist: *{escape_markdown(subtitle, version=2)}*", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.error(f"Find music error: {e}")
-        await feedback.edit_text("An error occurred while trying to identify the music.")
-    finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-
-async def handle_find_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
-    song_name = query.data.split(":", 1)[1]
-    await search_and_play_song(query, context, song_name)
-    await query.message.delete()
-
-async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    song_name = " ".join(context.args)
-    if not song_name:
-        await update.message.reply_text("Please provide a song name, e.g., `/play Burna Boy - Last Last`")
-        return
-    await search_and_play_song(update, context, song_name)
-
-async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_name: str) -> None:
-    message_to_reply_to = update.callback_query.message if update.callback_query else update.message
-    feedback = await message_to_reply_to.reply_text(f"Searching for '{song_name}'...")
-    try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1', 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(song_name, download=False)
-        if not info.get('entries'):
-            await feedback.edit_text("Sorry, couldn't find any results."); return
-        video = info['entries'][0]
-        title, video_id = video.get('title', 'Unknown Title'), video.get('id')
-        keyboard = [[InlineKeyboardButton("Yes, that's it!", callback_data=f"play_confirm:{video_id}")], [InlineKeyboardButton("No, cancel", callback_data="play_cancel")]]
-        await feedback.edit_text(f"I found: **{title}**\n\nIs this correct?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Play search error: {e}")
-        await feedback.edit_text("An error occurred while searching. YouTube may be blocking requests.")
-
-async def handle_play_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]
-    keyboard = [[InlineKeyboardButton("Audio", callback_data=f"dl_audio:{video_id}"), InlineKeyboardButton("Video", callback_data=f"dl_video:{video_id}")]]
-    await query.edit_message_text("Choose your desired format:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
-    video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
-    await query.edit_message_text("Downloading audio...")
-    try:
-        audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
-        audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-        await query.edit_message_text("Sending audio...")
-        with open(audio_path, 'rb') as audio_file:
-            await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
-        await query.delete_message()
-    except Exception as e:
-        logger.error(f"Audio download error: {e}"); await query.edit_message_text("An error occurred.")
-    finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     await query.edit_message_text("Search cancelled.")
@@ -717,23 +582,18 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await gemini_command(update, context, prompt_text=text)
         return
     
-    # After this point, we assume the state will be consumed, so we pop it.
     popped_state = context.user_data.pop('state')
     
-    # Handle multi-step commands like Gmail and new TikTok Search
     if popped_state == 'awaiting_email_address':
-        context.user_data['email_to'] = text
-        context.user_data['state'] = 'awaiting_email_subject' # Set the next state
+        context.user_data['email_to'] = text; context.user_data['state'] = 'awaiting_email_subject'
         await update.message.reply_text("Step 2 of 3: Great. Now, what should the subject be?")
         return
     elif popped_state == 'awaiting_email_subject':
-        context.user_data['email_subject'] = text
-        context.user_data['state'] = 'awaiting_email_body' # Set the next state
+        context.user_data['email_subject'] = text; context.user_data['state'] = 'awaiting_email_body'
         await update.message.reply_text("Step 3 of 3: Perfect. Please enter the message body.")
         return
     elif popped_state == 'awaiting_email_body':
-        to_address = context.user_data.pop('email_to', 'N/A')
-        subject = context.user_data.pop('email_subject', 'N/A')
+        to_address, subject = context.user_data.pop('email_to', 'N/A'), context.user_data.pop('email_subject', 'N/A')
         feedback = await update.message.reply_text(f"Sending email to {to_address}...")
         msg = EmailMessage(); msg.set_content(text); msg['Subject'] = subject; msg['From'] = os.environ.get("GMAIL_ADDRESS"); msg['To'] = to_address
         def send_email_sync():
@@ -751,7 +611,6 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await ask_for_tiktok_count(update, context, text)
         return
 
-    # Handle single-step commands that were prompted by a button
     state_handlers = {
         'awaiting_gemini_prompt': lambda: gemini_command(update, context, prompt_text=text),
         'awaiting_create_prompt': lambda: create_image_command(update, context, prompt=text),
@@ -767,7 +626,6 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         'awaiting_ytsearch_query': lambda: Youtube_command(update, context, query=text),
         'awaiting_suggestion': lambda: handle_suggestion(update, context, suggestion=text)
     }
-    
     if popped_state in state_handlers: await state_handlers[popped_state]()
 
 async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, suggestion: str):
@@ -791,8 +649,8 @@ def main() -> None:
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
         CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
         CommandHandler("screenshot", screenshot_command), CommandHandler("movie", movie_command),
-        CommandHandler("find", find_music_command), CommandHandler("tts", tts_command),
-        CommandHandler("tiktoksearch", tiktok_search_command), CommandHandler("ytsearch", Youtube_command),
+        CommandHandler("tts", tts_command), CommandHandler("tiktoksearch", tiktok_search_command),
+        CommandHandler("ytsearch", Youtube_command)
     ]
     
     menu_button_texts = {
@@ -801,7 +659,7 @@ def main() -> None:
         "Back to Main Menu": start, "End Chat": end_chat,
         "Chat with AI": start_ai_chat, "Tell a Joke": get_joke,
         "Ask a Riddle": get_riddle,
-        "Send Suggestion": lambda u,c: prompt_for_input(u,c,'awaiting_suggestion', "Please type your suggestion or feedback. I will forward it to the admin.","Pressed 'Suggestion'"),
+        "Send Suggestion": lambda u,c: prompt_for_input(u,c,'awaiting_suggestion', "Please type your suggestion or feedback and I will forward it to the admin.","Pressed 'Suggestion'"),
         "Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
         "Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
         "Text to Speech": lambda u,c: prompt_for_input(u,c,'awaiting_tts_text', "What text should I convert to speech?","Pressed 'TTS'"),
@@ -814,7 +672,6 @@ def main() -> None:
         "Search Movie": lambda u,c: prompt_for_input(u,c,'awaiting_movie_title', "What movie are you looking for?","Pressed 'Search Movie'"),
         "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_query', "What do you want to search for on TikTok?","Pressed 'Search TikTok'"),
         "Youtube": lambda u,c: prompt_for_input(u,c,'awaiting_ytsearch_query', "What do you want to search for on YouTube?","Pressed 'Youtube'"),
-        "Find Music": find_music_command,
         "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
         "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
         "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
@@ -832,7 +689,6 @@ def main() -> None:
         CallbackQueryHandler(handle_audio_download, pattern="^dl_audio:"),
         CallbackQueryHandler(handle_video_download, pattern="^dl_video:"),
         CallbackQueryHandler(handle_platform_selection, pattern="^dl_platform:"),
-        CallbackQueryHandler(handle_find_download, pattern="^find_dl:"),
         CallbackQueryHandler(handle_tiktok_count_selection, pattern="^tiktok_count:"),
     ]
 
