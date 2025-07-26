@@ -486,7 +486,6 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
             os.remove(temp_audio_path)
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    # This determines which chat to send the message to, works for both commands and callbacks
     chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat.id
 
     if not query:
@@ -544,7 +543,6 @@ async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Sorry, your search expired. Please try again.")
         return
     await query.edit_message_text("Great! Starting your search...")
-    # Pass the callback_query object as the 'update' parameter
     await tiktok_search_command(query, context, query=search_query, count=count)
 
 async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
@@ -556,9 +554,7 @@ async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
     feedback = await update.message.reply_text(f"Searching YouTube for '{query}'...")
     try:
         ydl_opts = {
-            'noplaylist': True,
-            'quiet': True,
-            'default_search': 'ytsearch5',
+            'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch5',
             'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -612,7 +608,10 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
-        audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files:
+            raise Exception("yt-dlp download failed silently.")
+        audio_path = os.path.join(temp_dir, downloaded_files[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
@@ -631,12 +630,14 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(video_id, download=False)
         filesize = info.get('filesize') or info.get('filesize_approx', 0)
-        file_size_mb = filesize / (1024 * 1024)
+        file_size_mb = filesize / (1024 * 1024) if filesize else 0
         if file_size_mb <= 49:
             await query.edit_message_text(f"Downloading video ({file_size_mb:.2f} MB)...")
             ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
             with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl: ydl_dl.download([video_id])
-            video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+            downloaded_files = os.listdir(temp_dir)
+            if not downloaded_files: raise Exception("yt-dlp download failed silently.")
+            video_path = os.path.join(temp_dir, downloaded_files[0])
             await query.edit_message_text("Sending video...")
             with open(video_path, 'rb') as video_file:
                 await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
