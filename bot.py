@@ -20,10 +20,10 @@ import io # For OCR
 import smtplib
 from email.message import EmailMessage
 import shlex # For smart command parsing
-import re # Added for robust button handling
-import math # Added for video splitting calculation
-from pydub import AudioSegment # For Shazam feature
-from google.cloud import texttospeech # For TTS
+import re
+import math
+from pydub import AudioSegment
+from gtts import gTTS # Use gTTS for Text-to-Speech
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -70,13 +70,7 @@ else:
     ADMIN_ID = int(ADMIN_ID)
 
 # --- API Configurations ---
-try:
-    if os.path.exists('google_credentials.json'):
-        tts_client = texttospeech.TextToSpeechAsyncClient.from_service_account_file('google_credentials.json')
-        logger.info("Google Text-to-Speech client configured.")
-    else: tts_client = None; logger.warning("google_credentials.json not found. TTS will be disabled.")
-except Exception as e: tts_client = None; logger.error(f"Failed to configure Google TTS: {e}")
-
+# Removed the complex Google Cloud TTS client setup
 try:
     if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -468,29 +462,42 @@ async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_T
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
+# --- REPLACED TTS COMMAND with gTTS METHOD ---
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_speak: str = None) -> None:
-    if not tts_client:
-        await update.message.reply_text("Text-to-Speech service is not configured.")
-        return
+    """Converts text to speech using the gTTS library."""
     if not text_to_speak:
-        if not context.args:
-            await update.message.reply_text("Please provide text to convert. Usage: `/tts Hello world`")
-            return
-        text_to_speak = " ".join(context.args)
+        if context.args:
+            text_to_speak = " ".join(context.args)
+        elif update.message.reply_to_message and update.message.reply_to_message.text:
+            text_to_speak = update.message.reply_to_message.text
+    
+    if not text_to_speak:
+        await update.message.reply_text("Usage: `/tts <text>` or reply to a message with `/tts`.")
+        return
+        
     if len(text_to_speak) > 1000:
         await update.message.reply_text("Text is too long (max 1000 characters).")
         return
+
     feedback = await update.message.reply_text("Generating audio...")
+    temp_audio_path = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.mp3")
     try:
-        synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
-        voice = texttospeech.VoiceSelectionParams(language_code="en-US", ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL)
-        audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
-        response = await tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-        await context.bot.send_audio(chat_id=update.effective_chat.id, audio=response.audio_content)
+        def generate_audio_sync():
+            tts = gTTS(text=text_to_speak, lang='en', slow=False)
+            tts.save(temp_audio_path)
+
+        await asyncio.to_thread(generate_audio_sync)
+        
+        with open(temp_audio_path, 'rb') as audio_file:
+            await context.bot.send_audio(chat_id=update.effective_chat.id, audio=audio_file, title="Generated Speech")
+        
         await feedback.delete()
     except Exception as e:
-        logger.error(f"TTS Error: {e}")
+        logger.error(f"gTTS Error: {e}")
         await feedback.edit_text("Sorry, an error occurred while generating the audio.")
+    finally:
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
 
 async def find_music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not RAPIDAPI_KEY:
@@ -593,16 +600,13 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir)
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     try:
         await query.edit_message_text("Downloading video...")
         video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(video_opts) as ydl:
-            ydl.download([video_id])
+        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([video_id])
         video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         if file_size_mb <= 49:
@@ -615,15 +619,12 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             download_link = await upload_to_gofile(video_path)
             if download_link:
                 keyboard = [[InlineKeyboardButton("Download Full Video", url=download_link)]]
-                await query.edit_message_text("The video was too large to send directly.\n\nYou can download the complete, unsplit file using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
+                await query.edit_message_text("The video was too large to send directly.\n\nYou can download it using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 await query.edit_message_text("Sorry, I downloaded the video but failed to upload it to a temporary host.")
-    except Exception as e:
-        logger.error(f"Video download/upload error: {e}")
-        await query.edit_message_text("An error occurred during the download process.")
+    except Exception as e: logger.error(f"Video download/upload error: {e}"); await query.edit_message_text("An error occurred during the download process.")
     finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def upload_to_gofile(file_path: str) -> str | None:
     try:
