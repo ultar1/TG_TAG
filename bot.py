@@ -184,6 +184,7 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "**Bot Commands Guide:**\n\n"
+        "You can use the menu buttons or the following commands:\n\n"
         "**/gemini <prompt>**: Ask the AI a question.\n"
         "**/create <prompt>**: Generate an image from text.\n"
         "**/movie <title>**: Get information about a movie.\n"
@@ -592,50 +593,56 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer()
     video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
-    info = None
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir)
     try:
         await query.edit_message_text("Downloading video...")
-        with yt_dlp.YoutubeDL({'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}) as ydl:
-            info = ydl.extract_info(video_id, download=False)
         video_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(video_opts) as ydl: ydl.download([video_id])
+        with yt_dlp.YoutubeDL(video_opts) as ydl:
+            ydl.download([video_id])
         video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         if file_size_mb <= 49:
-            await query.edit_message_text("Sending video...")
+            await query.edit_message_text("Sending video directly...")
             with open(video_path, 'rb') as video_file:
                 await context.bot.send_video(chat_id=query.message.chat_id, video=video_file, supports_streaming=True)
             await query.delete_message()
-            return
-        await query.edit_message_text(f"Video is large ({file_size_mb:.2f} MB). Splitting into parts...")
-        total_duration = info.get('duration')
-        if not total_duration:
-            await query.edit_message_text("Cannot split video: duration not found.")
-            return
-        num_parts = math.ceil(file_size_mb / 48)
-        part_duration = math.ceil(total_duration / num_parts)
-        split_cmd = ['ffmpeg', '-i', video_path, '-c', 'copy', '-map', '0', '-segment_time', str(part_duration), '-f', 'segment', '-reset_timestamps', '1', os.path.join(temp_dir, 'part_%03d.mp4')]
-        process = await asyncio.create_subprocess_exec(*split_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await process.communicate()
-        if process.returncode != 0:
-            logger.error(f"FFmpeg split failed for {video_id}.")
-            await query.edit_message_text("Sorry, I failed to split the video.")
-            return
-        parts = sorted([f for f in os.listdir(temp_dir) if f.startswith('part_')])
-        for i, part in enumerate(parts):
-            part_path = os.path.join(temp_dir, part)
-            await query.message.reply_text(f"Sending part {i+1} of {len(parts)}...")
-            with open(part_path, 'rb') as part_file:
-                await context.bot.send_document(chat_id=query.message.chat_id, document=part_file)
-            await asyncio.sleep(3)
-        await query.delete_message()
+        else:
+            await query.edit_message_text(f"Video is large ({file_size_mb:.2f} MB). Uploading to a temporary host...")
+            download_link = await upload_to_gofile(video_path)
+            if download_link:
+                keyboard = [[InlineKeyboardButton("Download Full Video", url=download_link)]]
+                await query.edit_message_text("The video was too large to send directly.\n\nYou can download the complete, unsplit file using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await query.edit_message_text("Sorry, I downloaded the video but failed to upload it to a temporary host.")
     except Exception as e:
-        logger.error(f"Video download/split error: {e}"); await query.edit_message_text("An error occurred during the download.")
+        logger.error(f"Video download/upload error: {e}")
+        await query.edit_message_text("An error occurred during the download process.")
     finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+async def upload_to_gofile(file_path: str) -> str | None:
+    try:
+        server_response = requests.get("https://api.gofile.io/getServer", timeout=10)
+        server_response.raise_for_status()
+        server = server_response.json()['data']['server']
+        with open(file_path, 'rb') as f:
+            files = {'file': f}
+            upload_response = requests.post(f"https://{server}.gofile.io/uploadFile", files=files, timeout=300)
+            upload_response.raise_for_status()
+        upload_data = upload_response.json()
+        if upload_data.get("status") == "ok":
+            return upload_data['data']['downloadPage']
+        else:
+            logger.error(f"GoFile upload failed: {upload_data}")
+            return None
+    except Exception as e:
+        logger.error(f"Error during GoFile upload: {e}")
+        return None
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
