@@ -24,6 +24,7 @@ import re # For robust button handling
 from gtts import gTTS
 import random
 import time
+from flask import Flask, request # For web server
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -60,6 +61,7 @@ STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 SCREENSHOT_API_KEY = os.environ.get("SCREENSHOT_API_KEY")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
+RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
 
 # --- Initial Checks ---
 if not all([BOT_TOKEN, DATABASE_URL, ADMIN_ID]):
@@ -747,7 +749,7 @@ async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await update.message.reply_text("Thank you! Your suggestion has been sent to the admin.")
 
 # --- Main Application Setup ---
-def main() -> None:
+def setup_application():
     application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
     
     cmd_handlers = [
@@ -804,15 +806,40 @@ def main() -> None:
     application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(escaped_patterns)})$"), record_user_message))
     
-    PORT = int(os.environ.get("PORT", 8443))
-    RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
-    if not RENDER_APP_NAME:
-        logger.info("Running in polling mode.")
-        application.run_polling()
-    else:
-        WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
-        logger.info(f"Running in webhook mode. URL: {WEBHOOK_URL}")
-        application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=WEBHOOK_URL)
+    return application
+
+application = setup_application()
+app = Flask(__name__)
+
+@app.route("/")
+def health_check():
+    """This page is for the cron job to ping."""
+    return "Bot is running!", 200
+
+@app.route(f"/{BOT_TOKEN}", methods=['POST'])
+async def webhook():
+    """This is the main webhook endpoint for Telegram."""
+    try:
+        update = Update.de_json(await request.get_json(), application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Error in webhook: {e}")
+        return "Error", 500
+
+async def setup_webhook():
+    """Set the webhook on application startup."""
+    if RENDER_APP_NAME:
+        webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
+        if (await application.bot.get_webhook_info()).url != webhook_url:
+            await application.bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook set to {webhook_url}")
+
+# Set up asyncio loop to run startup task
+if RENDER_APP_NAME:
+    asyncio.get_event_loop().run_until_complete(setup_webhook())
 
 if __name__ == "__main__":
-    main()
+    if not RENDER_APP_NAME:
+        logger.info("Starting bot in polling mode...")
+        application.run_polling()
