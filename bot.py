@@ -20,10 +20,10 @@ import io # For OCR
 import smtplib
 from email.message import EmailMessage
 import shlex # For smart command parsing
-import re
-import math
+import re # For robust button handling
 from pydub import AudioSegment
-from gtts import gTTS # Use gTTS for Text-to-Speech
+from gtts import gTTS
+import random # For shuffling TikTok results
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -70,7 +70,6 @@ else:
     ADMIN_ID = int(ADMIN_ID)
 
 # --- API Configurations ---
-# Removed the complex Google Cloud TTS client setup
 try:
     if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -144,9 +143,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [KeyboardButton("Chat with AI"), KeyboardButton("Create Image")],
-        [KeyboardButton("Read Text from Image"), KeyboardButton("Animate Image")],
-        [KeyboardButton("Upscale Image"), KeyboardButton("Summarize Link")],
-        [KeyboardButton("Summarize File"), KeyboardButton("Back to Main Menu")]
+        [KeyboardButton("Read Text from Image"), KeyboardButton("Text to Speech")],
+        [KeyboardButton("Animate Image"), KeyboardButton("Upscale Image")],
+        [KeyboardButton("Summarize Link"), KeyboardButton("Summarize File")],
+        [KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("AI Tools:", reply_markup=reply_markup)
@@ -154,8 +154,8 @@ async def show_ai_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_media_tools_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [KeyboardButton("Play Music / Video"), KeyboardButton("Download Media")],
-        [KeyboardButton("Search Movie"), KeyboardButton("Find Music")],
-        [KeyboardButton("Back to Main Menu")]
+        [KeyboardButton("Search TikTok"), KeyboardButton("Search Movie")],
+        [KeyboardButton("Find Music"), KeyboardButton("Back to Main Menu")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Media Tools:", reply_markup=reply_markup)
@@ -165,7 +165,6 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         [KeyboardButton("Weather"), KeyboardButton("Crypto Prices")],
         [KeyboardButton("Translate Text"), KeyboardButton("Tell a Joke")],
         [KeyboardButton("Ask a Riddle"), KeyboardButton("Take Screenshot")],
-        [KeyboardButton("Text to Speech")]
     ]
     if update.effective_user.id == ADMIN_ID:
         keyboard.append([KeyboardButton("Send Email (Admin)")])
@@ -182,6 +181,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/gemini <prompt>**: Ask the AI a question.\n"
         "**/create <prompt>**: Generate an image from text.\n"
         "**/movie <title>**: Get information about a movie.\n"
+        "**/tiktoksearch <query>**: Search for TikTok videos.\n"
         "**/play <song name>**: Search and download a song or video.\n"
         "**/find**: Reply to audio/video to identify the song.\n"
         "**/tts <text>**: Convert text to speech.\n"
@@ -462,9 +462,7 @@ async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_T
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
-# --- REPLACED TTS COMMAND with gTTS METHOD ---
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_speak: str = None) -> None:
-    """Converts text to speech using the gTTS library."""
     if not text_to_speak:
         if context.args:
             text_to_speak = " ".join(context.args)
@@ -546,6 +544,42 @@ async def find_music_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
+async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
+    if not query:
+        if not context.args:
+            await update.message.reply_text("Please provide a search term. Usage: `/tiktoksearch <query>`")
+            return
+        query = " ".join(context.args)
+    feedback = await update.message.reply_text(f"Searching TikTok for '{query}'...")
+    try:
+        api_url = 'https://tikwm.com/api/feed/search'
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Cookie": "current_language=en", "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"}
+        data = {'keywords': query, 'count': '12', 'cursor': '0'}
+        response = requests.post(api_url, headers=headers, data=data, timeout=20)
+        response.raise_for_status()
+        videos = response.json().get('data', {}).get('videos', [])
+        if not videos:
+            await feedback.edit_text("No TikTok videos found for that search.")
+            return
+        await feedback.edit_text(f"Found {len(videos)} videos. Sending up to 5...")
+        random.shuffle(videos)
+        for video in videos[:5]:
+            video_url, caption = video.get('play'), video.get('title', 'No caption')
+            if video_url:
+                try:
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=video_url, caption=caption, read_timeout=60, write_timeout=60)
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logger.error(f"Failed to send TikTok video {video_url}: {e}")
+                    await context.bot.send_message(update.effective_chat.id, f"Could not send one of the videos.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"TikTok API request failed: {e}")
+        await feedback.edit_text("An error occurred while contacting the TikTok service.")
+    except Exception as e:
+        logger.error(f"TikTok search failed: {e}")
+        await feedback.edit_text("An unexpected error occurred.")
+
+
 async def handle_find_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
     song_name = query.data.split(":", 1)[1]
@@ -616,33 +650,31 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             await query.delete_message()
         else:
             await query.edit_message_text(f"Video is large ({file_size_mb:.2f} MB). Uploading to a temporary host...")
-            download_link = await upload_to_gofile(video_path)
+            download_link = await upload_to_fileio(video_path)
             if download_link:
                 keyboard = [[InlineKeyboardButton("Download Full Video", url=download_link)]]
-                await query.edit_message_text("The video was too large to send directly.\n\nYou can download it using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
+                await query.edit_message_text("The video was too large to send directly.\n\nYou can download it using this temporary link (expires after one download):", reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 await query.edit_message_text("Sorry, I downloaded the video but failed to upload it to a temporary host.")
-    except Exception as e: logger.error(f"Video download/upload error: {e}"); await query.edit_message_text("An error occurred during the download process.")
+    except Exception as e:
+        logger.error(f"Video download/upload error: {e}")
+        await query.edit_message_text("An error occurred during the download process.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
-async def upload_to_gofile(file_path: str) -> str | None:
+async def upload_to_fileio(file_path: str) -> str | None:
     try:
-        server_response = requests.get("https://api.gofile.io/getServer", timeout=10)
-        server_response.raise_for_status()
-        server = server_response.json()['data']['server']
         with open(file_path, 'rb') as f:
-            files = {'file': f}
-            upload_response = requests.post(f"https://{server}.gofile.io/uploadFile", files=files, timeout=300)
-            upload_response.raise_for_status()
-        upload_data = upload_response.json()
-        if upload_data.get("status") == "ok":
-            return upload_data['data']['downloadPage']
+            response = requests.post("https://file.io", files={"file": f}, timeout=300)
+            response.raise_for_status()
+        upload_data = response.json()
+        if upload_data.get("success"):
+            return upload_data.get('link')
         else:
-            logger.error(f"GoFile upload failed: {upload_data}")
+            logger.error(f"file.io upload failed: {upload_data}")
             return None
     except Exception as e:
-        logger.error(f"Error during GoFile upload: {e}")
+        logger.error(f"Error during file.io upload: {e}")
         return None
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -741,39 +773,24 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if state == 'continuous_chat':
         await gemini_command(update, context, prompt_text=text)
         return
+    
+    # After this point, we assume the state will be consumed, so we pop it.
     context.user_data.pop('state')
-    if state == 'awaiting_gemini_prompt': await gemini_command(update, context, prompt_text=text)
-    elif state == 'awaiting_create_prompt': await create_image_command(update, context, prompt=text)
-    elif state == 'awaiting_song_name': await search_and_play_song(update, context, song_name=text)
-    elif state == 'awaiting_city': await get_weather(update, context, city=text)
-    elif state == 'awaiting_crypto_symbols': await get_crypto_prices(update, context, crypto_ids=text)
-    elif state == 'awaiting_summary_url': await summarize_url(update, context, url=text)
-    elif state == 'awaiting_translation_text': await translate_command(update, context, text_to_translate=text)
-    elif state == 'awaiting_download_url':
-        platform = context.user_data.pop('platform', 'unknown')
-        await download_content_from_url(update, context, content_url=text, platform=platform)
-    elif state == 'awaiting_screenshot_url': await screenshot_command(update, context, url=text)
-    elif state == 'awaiting_movie_title': await movie_command(update, context, title=text)
-    elif state == 'awaiting_tts_text': await tts_command(update, context, text_to_speak=text)
-    elif state == 'awaiting_suggestion':
-        user = update.effective_user
-        admin_message = (f"📩 New Suggestion Received\n\n"
-                         f"From: {user.first_name} (`{user.id}`)\n"
-                         f"Username: @{user.username or 'N/A'}\n\n"
-                         f"Suggestion:\n{text}")
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode=ParseMode.MARKDOWN)
-        await update.message.reply_text("Thank you! Your suggestion has been sent to the admin.")
-    elif state == 'awaiting_email_address':
+    
+    # Handle multi-step commands like Gmail
+    if state == 'awaiting_email_address':
         context.user_data['email_to'] = text
-        context.user_data['state'] = 'awaiting_email_subject'
+        context.user_data['state'] = 'awaiting_email_subject' # Set the next state
         await update.message.reply_text("Step 2 of 3: Great. Now, what should the subject be?")
+        return
     elif state == 'awaiting_email_subject':
         context.user_data['email_subject'] = text
-        context.user_data['state'] = 'awaiting_email_body'
+        context.user_data['state'] = 'awaiting_email_body' # Set the next state
         await update.message.reply_text("Step 3 of 3: Perfect. Please enter the message body.")
+        return
     elif state == 'awaiting_email_body':
-        to_address = context.user_data.pop('email_to')
-        subject = context.user_data.pop('email_subject')
+        to_address = context.user_data.pop('email_to', 'N/A')
+        subject = context.user_data.pop('email_subject', 'N/A')
         feedback = await update.message.reply_text(f"Sending email to {to_address}...")
         msg = EmailMessage(); msg.set_content(text); msg['Subject'] = subject; msg['From'] = os.environ.get("GMAIL_ADDRESS"); msg['To'] = to_address
         def send_email_sync():
@@ -786,6 +803,36 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         success = await asyncio.to_thread(send_email_sync)
         if success: await feedback.edit_text("Email sent successfully!")
         else: await feedback.edit_text("Failed to send email. Check server logs.")
+        return
+
+    # Handle single-step commands
+    state_handlers = {
+        'awaiting_gemini_prompt': lambda: gemini_command(update, context, prompt_text=text),
+        'awaiting_create_prompt': lambda: create_image_command(update, context, prompt=text),
+        'awaiting_song_name': lambda: search_and_play_song(update, context, song_name=text),
+        'awaiting_city': lambda: get_weather(update, context, city=text),
+        'awaiting_crypto_symbols': lambda: get_crypto_prices(update, context, crypto_ids=text),
+        'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
+        'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
+        'awaiting_download_url': lambda: download_content_from_url(update, context, content_url=text, platform=context.user_data.pop('platform', 'unknown')),
+        'awaiting_screenshot_url': lambda: screenshot_command(update, context, url=text),
+        'awaiting_movie_title': lambda: movie_command(update, context, title=text),
+        'awaiting_tts_text': lambda: tts_command(update, context, text_to_speak=text),
+        'awaiting_tiktok_query': lambda: tiktok_search_command(update, context, query=text),
+        'awaiting_suggestion': lambda: handle_suggestion(update, context, suggestion=text)
+    }
+    
+    if state in state_handlers: await state_handlers[state]()
+
+async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, suggestion: str):
+    user = update.effective_user
+    admin_message = (f"📩 New Suggestion Received\n\n"
+                     f"From: {user.first_name} (`{user.id}`)\n"
+                     f"Username: @{user.username or 'N/A'}\n\n"
+                     f"Suggestion:\n{suggestion}")
+    await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("Thank you! Your suggestion has been sent to the admin.")
+
 
 # --- Main Application Setup ---
 def main() -> None:
@@ -800,6 +847,7 @@ def main() -> None:
         CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
         CommandHandler("screenshot", screenshot_command), CommandHandler("movie", movie_command),
         CommandHandler("find", find_music_command), CommandHandler("tts", tts_command),
+        CommandHandler("tiktoksearch", tiktok_search_command)
     ]
     
     menu_button_texts = {
@@ -811,6 +859,7 @@ def main() -> None:
         "Send Suggestion": lambda u,c: prompt_for_input(u,c,'awaiting_suggestion', "Please type your suggestion or feedback. I will forward it to the admin.","Pressed 'Suggestion'"),
         "Create Image": lambda u,c: prompt_for_input(u,c,'awaiting_create_prompt', "Describe the image to create.","Pressed 'Create Image'"),
         "Read Text from Image": lambda u,c: u.message.reply_text("Please reply to an image with /readtext to use this feature."),
+        "Text to Speech": lambda u,c: prompt_for_input(u,c,'awaiting_tts_text', "What text should I convert to speech?","Pressed 'TTS'"),
         "Upscale Image": lambda u,c: u.message.reply_text("Please reply to an image with /upscale."),
         "Animate Image": lambda u,c: u.message.reply_text("Please reply to an image with /animate."),
         "Summarize File": lambda u,c: u.message.reply_text("Please reply to an image or PDF with /summarize_file."),
@@ -818,13 +867,13 @@ def main() -> None:
         "Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
         "Download Media": show_download_platform_options,
         "Search Movie": lambda u,c: prompt_for_input(u,c,'awaiting_movie_title', "What movie are you looking for?","Pressed 'Search Movie'"),
-        "Find Music": lambda u,c: u.message.reply_text("Please reply to a video or audio file with the /find command to identify it."),
+        "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_query', "What do you want to search for on TikTok?","Pressed 'Search TikTok'"),
+        "Find Music": find_music_command,
         "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
         "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
         "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
         "Convert Video to Audio": lambda u,c: u.message.reply_text("To use this feature, please reply to a video with the /mp4 command."),
         "Take Screenshot": lambda u,c: prompt_for_input(u,c,'awaiting_screenshot_url', "Please enter the website URL to capture.","Pressed 'Take Screenshot'"),
-        "Text to Speech": lambda u,c: prompt_for_input(u,c,'awaiting_tts_text', "What text should I convert to speech?","Pressed 'TTS'"),
         "Send Email (Admin)": gmail_command,
     }
     
