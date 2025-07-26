@@ -23,6 +23,7 @@ import shlex # For smart command parsing
 import re # For robust button handling
 from gtts import gTTS
 import random
+import time
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
@@ -180,9 +181,43 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/play <song name>**: Search and download a song or video.\n"
         "**/tts <text>**: Convert text to speech.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
-        "**/gmail**: Send an email (Admin only)."
+        "**/gmail**: Send an email (Admin only).\n"
+        "**/ping <url>**: Check if a website is online (Admin only)."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the admin only.")
+        return
+    if not context.args:
+        await update.message.reply_text("Please provide a URL to check. Usage: `/ping google.com`")
+        return
+    url = context.args[0]
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
+    feedback = await update.message.reply_text(f"Pinging `{url}`...", parse_mode=ParseMode.MARKDOWN)
+    try:
+        start_time = time.time()
+        response = requests.get(url, timeout=10)
+        end_time = time.time()
+        response_time_ms = (end_time - start_time) * 1000
+        status_code = response.status_code
+        result_text = (
+            f"Site is Online\n\n"
+            f"URL: `{url}`\n"
+            f"Status: `{status_code} {response.reason}`\n"
+            f"Response Time: `{response_time_ms:.2f} ms`"
+        )
+        await feedback.edit_text(result_text, parse_mode=ParseMode.MARKDOWN)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ping error for {url}: {e}")
+        error_text = (
+            f"Site is Offline or Unreachable\n\n"
+            f"URL: `{url}`\n"
+            f"Error: Could not connect."
+        )
+        await feedback.edit_text(error_text, parse_mode=ParseMode.MARKDOWN)
 
 async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, event_type="Started AI Chat")
@@ -264,9 +299,9 @@ async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, titl
         poster_path = details.get('poster_path')
         poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
         caption = (
-            f"🎬 *{escape_markdown(movie_title, version=2)} ({release_year})*\n\n"
-            f"⭐ *Rating:* {rating}\n"
-            f"🎭 *Genres:* {genres}\n\n"
+            f"*{escape_markdown(movie_title, version=2)} ({release_year})*\n\n"
+            f"*Rating:* {rating}\n"
+            f"*Genres:* {genres}\n\n"
             f"_{escape_markdown(overview, version=2)}_"
         )
         if poster_url:
@@ -374,88 +409,6 @@ async def summarize_file_command(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"File summarization error: {e}")
         await feedback_message.edit_text("Sorry, an error occurred while processing the file.")
 
-async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str = None) -> None:
-    if not openai_client: await update.message.reply_text("Image generation service (OpenAI) is not configured."); return
-    if not prompt: prompt = " ".join(context.args)
-    if not prompt: await update.message.reply_text("Please describe the image you want to create."); return
-    feedback = await update.message.reply_text("Creating your image with DALL-E 3...")
-    try:
-        response = await openai_client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024", quality="standard")
-        await context.bot.send_photo(update.effective_chat.id, photo=response.data[0].url, caption=f"Creation: `{prompt}`", parse_mode=ParseMode.MARKDOWN)
-        await feedback.delete()
-    except Exception as e:
-        logger.error(f"DALL-E 3 API error: {e}")
-        await feedback.edit_text("Sorry, I couldn't create the image.")
-
-async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not CLIPDROP_API_KEY: await update.message.reply_text("Image upscaling service not configured."); return
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo: await update.message.reply_text("Please reply to an image with /upscale."); return
-    feedback = await update.message.reply_text("Upscaling your image...")
-    try:
-        photo_file = await update.message.reply_to_message.photo[-1].get_file()
-        response = requests.post('https://clipdrop-api.co/image-upscaling/v1/upscale', files={'image_file': await photo_file.download_as_bytearray()}, headers={'x-api-key': CLIPDROP_API_KEY}, timeout=90)
-        response.raise_for_status()
-        await context.bot.send_document(update.effective_chat.id, response.content, filename='upscaled.png', caption='Here is your upscaled image!')
-        await feedback.delete()
-    except Exception as e:
-        logger.error(f"ClipDrop API Error: {e}")
-        await feedback.edit_text("Sorry, an error occurred while upscaling.")
-
-async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not STABILITY_API_KEY: await update.message.reply_text("Video animation service not configured."); return
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo: await update.message.reply_text("Please reply to an image with /animate."); return
-    feedback = await update.message.reply_text("Sending image to animation engine...")
-    try:
-        photo_file = await update.message.reply_to_message.photo[-1].get_file()
-        response = requests.post("https://api.stability.ai/v2/generation/image-to-video", headers={"authorization": f"Bearer {STABILITY_API_KEY}"}, files={"image": await photo_file.download_as_bytearray()}, data={"motion_bucket_id": 40}, timeout=30)
-        response.raise_for_status()
-        generation_id = response.json()["id"]
-        await feedback.edit_text("Animation started. This may take a minute...")
-        for _ in range(45):
-            await asyncio.sleep(4)
-            res = requests.get(f"https://api.stability.ai/v2/generation/image-to-video/result/{generation_id}", headers={'authorization': f"Bearer {STABILITY_API_KEY}", 'accept': "video/mp4"}, timeout=20)
-            if res.status_code == 200:
-                await context.bot.send_video(update.effective_chat.id, video=res.content, caption="Here is your animated video!")
-                await feedback.delete()
-                return
-        await feedback.edit_text("Sorry, the animation timed out.")
-    except Exception as e:
-        logger.error(f"Animate command error: {e}")
-        await feedback.edit_text("Sorry, an error occurred while creating the animation.")
-
-async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message.reply_to_message or not update.message.reply_to_message.video:
-        await update.message.reply_text("To convert a video to audio, please reply to the video with the `/mp4` command.")
-        return
-    await save_user_to_db(update, context, event_type="Used /mp4 command")
-    feedback_message = await update.message.reply_text("Downloading video...")
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir, exist_ok=True)
-    try:
-        video = update.message.reply_to_message.video
-        video_file = await video.get_file()
-        original_video_path = os.path.join(temp_dir, f"{video.file_unique_id}.mp4")
-        await video_file.download_to_drive(original_video_path)
-        await feedback_message.edit_text("Converting to audio...")
-        output_audio_path = os.path.join(temp_dir, f"{video.file_unique_id}.mp3")
-        ffmpeg_command = ['ffmpeg', '-i', original_video_path, '-vn', '-q:a', '0', '-map', 'a', output_audio_path]
-        process = await asyncio.create_subprocess_exec(*ffmpeg_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await process.communicate()
-        if process.returncode != 0:
-            logger.error(f"FFmpeg conversion failed. Stderr: {stderr.decode()}")
-            await feedback_message.edit_text("Sorry, the conversion failed.")
-            return
-        await feedback_message.edit_text("Uploading audio...")
-        with open(output_audio_path, 'rb') as audio_file:
-            await context.bot.send_audio(chat_id=update.effective_chat.id, audio=audio_file, title=video.file_name or "Converted Audio", duration=video.duration)
-        await feedback_message.delete()
-    except Exception as e:
-        logger.error(f"Error in /mp4 command: {e}")
-        await feedback_message.edit_text("An unexpected error occurred.")
-    finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_to_speak: str = None) -> None:
     if not text_to_speak:
         if context.args:
@@ -486,9 +439,7 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
             os.remove(temp_audio_path)
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    # --- FIX: Correctly determine chat_id from either an Update or a CallbackQuery ---
-    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat_id
-
+    chat_id = update.effective_chat.id
     if not query:
         if not context.args:
             await context.bot.send_message(chat_id, "Please provide a search term.")
@@ -496,7 +447,6 @@ async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         query = " ".join(context.args)
         await ask_for_tiktok_count(update, context, query)
         return
-    
     feedback = await context.bot.send_message(chat_id=chat_id, text=f"Searching TikTok for '{query}'...")
     try:
         api_url = 'https://tikwm.com/api/feed/search'
@@ -505,14 +455,11 @@ async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         response = requests.post(api_url, headers=headers, data=data, timeout=20)
         response.raise_for_status()
         videos = response.json().get('data', {}).get('videos', [])
-        
         if not videos:
             await feedback.edit_text("No TikTok videos found for that search.")
             return
-            
         await feedback.edit_text(f"Found {len(videos)} videos. Sending {count} of them...")
         random.shuffle(videos)
-        
         for video in videos[:count]:
             video_url, caption = video.get('play'), video.get('title', 'No caption')
             if video_url:
@@ -544,7 +491,7 @@ async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Sorry, your search expired. Please try again.")
         return
     await query.edit_message_text("Great! Starting your search...")
-    await tiktok_search_command(query, context, query=search_query, count=count)
+    await tiktok_search_command(update, context, query=search_query, count=count)
 
 async def Youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
     if not query:
@@ -679,48 +626,6 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['state'] = 'awaiting_download_url'; context.user_data['platform'] = platform_name
     await query.edit_message_text(text=f"Okay, send me the full URL for the {platform_name} content.")
 
-async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str, platform: str) -> None:
-    if platform.lower() == 'tiktok':
-        feedback = await update.message.reply_text("Analyzing TikTok link...")
-        try:
-            api_url = f"https://tikwm.com/api/?url={content_url}"
-            response = requests.get(api_url, timeout=15).json()
-            if response.get('code') == 0 and 'data' in response:
-                data = response['data']
-                if 'images' in data and data['images']:
-                    await feedback.edit_text(f"Found {len(data['images'])} photos. Sending them now...")
-                    for image_url in data['images']:
-                        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
-                    await feedback.delete()
-                    return
-                else:
-                    await feedback.edit_text("It's a video. Using the standard downloader...")
-            else:
-                 await feedback.edit_text("Could not fetch details. Trying standard downloader...")
-        except Exception as e:
-            logger.error(f"TikTok API error for {content_url}: {e}")
-            await feedback.edit_text("Could not fetch details. Trying standard downloader...")
-
-    feedback = await update.message.reply_text(f"Starting download from {platform}...")
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir, exist_ok=True)
-    try:
-        ydl_opts = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
-        if platform.lower() == 'youtube' and os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
-        elif os.path.exists('cookies.txt'): ydl_opts['cookiefile'] = 'cookies.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([content_url])
-        downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files: raise Exception("Download failed silently")
-        downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
-        await feedback.edit_text("Uploading to Telegram...")
-        with open(downloaded_file_path, 'rb') as f:
-            await context.bot.send_video(chat_id=update.effective_chat.id, video=f, supports_streaming=True)
-        await feedback.delete()
-    except Exception as e:
-        logger.error(f"Download error for {content_url}: {e}")
-        await feedback.edit_text("Download failed. The link may be private or invalid.")
-    finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
@@ -834,7 +739,7 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, suggestion: str):
     user = update.effective_user
-    admin_message = (f"📩 New Suggestion Received\n\n"
+    admin_message = (f"New Suggestion Received\n\n"
                      f"From: {user.first_name} (`{user.id}`)\n"
                      f"Username: @{user.username or 'N/A'}\n\n"
                      f"Suggestion:\n{suggestion}")
@@ -854,7 +759,7 @@ def main() -> None:
         CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
         CommandHandler("screenshot", screenshot_command), CommandHandler("movie", movie_command),
         CommandHandler("tts", tts_command), CommandHandler("tiktoksearch", tiktok_search_command),
-        CommandHandler("ytsearch", Youtube_command)
+        CommandHandler("ytsearch", Youtube_command), CommandHandler("ping", ping_command),
     ]
     
     menu_button_texts = {
