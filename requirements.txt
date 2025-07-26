@@ -16,3 +16,5 @@ PyMuPDF
 azapi
 googlesearch-python
 python-dotenv
+google-cloud-texttospeech
+pydub
