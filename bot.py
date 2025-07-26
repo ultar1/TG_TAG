@@ -70,17 +70,12 @@ else:
     ADMIN_ID = int(ADMIN_ID)
 
 # --- API Configurations ---
-# Google TTS Client
 try:
     if os.path.exists('google_credentials.json'):
         tts_client = texttospeech.TextToSpeechAsyncClient.from_service_account_file('google_credentials.json')
         logger.info("Google Text-to-Speech client configured.")
-    else:
-        tts_client = None
-        logger.warning("google_credentials.json not found. TTS will be disabled.")
-except Exception as e:
-    tts_client = None
-    logger.error(f"Failed to configure Google TTS: {e}")
+    else: tts_client = None; logger.warning("google_credentials.json not found. TTS will be disabled.")
+except Exception as e: tts_client = None; logger.error(f"Failed to configure Google TTS: {e}")
 
 try:
     if GEMINI_API_KEY:
@@ -189,7 +184,6 @@ async def show_utilities_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
         "**Bot Commands Guide:**\n\n"
-        "You can use the menu buttons or the following commands:\n\n"
         "**/gemini <prompt>**: Ask the AI a question.\n"
         "**/create <prompt>**: Generate an image from text.\n"
         "**/movie <title>**: Get information about a movie.\n"
@@ -636,6 +630,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text(f"Sending part {i+1} of {len(parts)}...")
             with open(part_path, 'rb') as part_file:
                 await context.bot.send_document(chat_id=query.message.chat_id, document=part_file)
+            await asyncio.sleep(3)
         await query.delete_message()
     except Exception as e:
         logger.error(f"Video download/split error: {e}"); await query.edit_message_text("An error occurred during the download.")
