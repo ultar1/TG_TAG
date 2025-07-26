@@ -1,5 +1,11 @@
+# requirements.txt
+
 # Core bot library with extras for rate limiting and webhooks
 python-telegram-bot[rate-limiter,webhooks]
+
+# Web Server
+Flask
+gunicorn
 
 # Database
 SQLAlchemy
