@@ -486,7 +486,8 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
             os.remove(temp_audio_path)
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat.id
+    # FIX: Correctly determine chat_id from either an Update or a CallbackQuery
+    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.message.chat_id
 
     if not query:
         if not context.args:
@@ -617,7 +618,7 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
     except Exception as e:
-        logger.error(f"Audio download error: {e}"); await query.edit_message_text("An error occurred.")
+        logger.error(f"Audio download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred during download. The video might be protected.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
@@ -636,7 +637,8 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
             with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl: ydl_dl.download([video_id])
             downloaded_files = os.listdir(temp_dir)
-            if not downloaded_files: raise Exception("yt-dlp download failed silently.")
+            if not downloaded_files:
+                raise Exception("yt-dlp download failed silently.")
             video_path = os.path.join(temp_dir, downloaded_files[0])
             await query.edit_message_text("Sending video...")
             with open(video_path, 'rb') as video_file:
@@ -651,7 +653,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text("The video is too large and I couldn't get a direct download link.")
     except Exception as e:
         logger.error(f"Video download error for ID {video_id}: {e}")
-        await query.edit_message_text("An error occurred during the download process.")
+        await query.edit_message_text("An error occurred during the download process. The video may be private or protected.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
