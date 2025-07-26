@@ -623,22 +623,37 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer()
     video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir)
+    
+    info = None # To store video metadata
+    
     await query.edit_message_text("Checking video details...")
     try:
-        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: info = ydl.extract_info(video_id, download=False)
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
+            'quiet': True, 
+            'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_id, download=False)
+
         filesize = info.get('filesize') or info.get('filesize_approx', 0)
         file_size_mb = filesize / (1024 * 1024) if filesize else 0
+        
         if file_size_mb <= 49:
             await query.edit_message_text(f"Downloading video ({file_size_mb:.2f} MB)...")
             ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
-            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl: ydl_dl.download([video_id])
+            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl:
+                ydl_dl.download([video_id])
+            
             downloaded_files = os.listdir(temp_dir)
             if not downloaded_files:
                 raise Exception("yt-dlp download failed silently.")
+                
             video_path = os.path.join(temp_dir, downloaded_files[0])
             await query.edit_message_text("Sending video...")
             with open(video_path, 'rb') as video_file:
@@ -651,11 +666,28 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text(f"This video is too large to send ({file_size_mb:.2f} MB).\n\nYou can download it directly using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 await query.edit_message_text("The video is too large and I couldn't get a direct download link.")
+
     except Exception as e:
         logger.error(f"Video download error for ID {video_id}: {e}")
-        await query.edit_message_text("An error occurred during the download process. The video may be private or protected.")
+        
+        # --- NEW: Fallback logic with download button ---
+        error_message = "An error occurred during the download process. The video may be private or protected."
+        keyboard = None
+        
+        if info:  # Check if we successfully got the video metadata
+            video_url = info.get('url')
+            if video_url:
+                error_message += "\n\nYou can try watching or downloading it directly using this link:"
+                keyboard = [[InlineKeyboardButton("Watch/Download Video (Direct Link)", url=video_url)]]
+        
+        await query.edit_message_text(
+            error_message, 
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+        )
+        
     finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
