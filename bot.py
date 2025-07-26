@@ -486,8 +486,8 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
             os.remove(temp_audio_path)
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    # FIX: Correctly determine chat_id from either an Update or a CallbackQuery
-    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.message.chat_id
+    # --- FIX: Correctly determine chat_id from either an Update or a CallbackQuery ---
+    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat_id
 
     if not query:
         if not context.args:
@@ -606,54 +606,41 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
     video_id = query.data.split(":")[1]
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
     await query.edit_message_text("Downloading audio...")
+    info = None
     try:
         audio_opts = {'format': 'bestaudio/best', 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'noplaylist': True, 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(audio_opts) as ydl: info = ydl.extract_info(video_id, download=True)
         downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files:
-            raise Exception("yt-dlp download failed silently.")
+        if not downloaded_files: raise Exception("yt-dlp download failed silently.")
         audio_path = os.path.join(temp_dir, downloaded_files[0])
         await query.edit_message_text("Sending audio...")
         with open(audio_path, 'rb') as audio_file:
             await context.bot.send_audio(chat_id=query.message.chat_id, audio=audio_file, title=info.get('title'), duration=info.get('duration'))
         await query.delete_message()
     except Exception as e:
-        logger.error(f"Audio download error for ID {video_id}: {e}"); await query.edit_message_text("An error occurred during download. The video might be protected.")
+        logger.error(f"Audio download error for ID {video_id}: {e}")
+        await query.edit_message_text("An error occurred during download. The video might be protected.")
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     video_id = query.data.split(":")[1]
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir)
-    
-    info = None # To store video metadata
-    
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir)
+    info = None
     await query.edit_message_text("Checking video details...")
     try:
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            'quiet': True, 
-            'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None
-        }
+        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True, 'cookiefile': 'cookies_youtube.txt' if os.path.exists('cookies_youtube.txt') else None}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_id, download=False)
-
         filesize = info.get('filesize') or info.get('filesize_approx', 0)
         file_size_mb = filesize / (1024 * 1024) if filesize else 0
-        
         if file_size_mb <= 49:
             await query.edit_message_text(f"Downloading video ({file_size_mb:.2f} MB)...")
             ydl_opts_download = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), **ydl_opts}
-            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl:
-                ydl_dl.download([video_id])
-            
+            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl: ydl_dl.download([video_id])
             downloaded_files = os.listdir(temp_dir)
-            if not downloaded_files:
-                raise Exception("yt-dlp download failed silently.")
-                
+            if not downloaded_files: raise Exception("yt-dlp download failed silently.")
             video_path = os.path.join(temp_dir, downloaded_files[0])
             await query.edit_message_text("Sending video...")
             with open(video_path, 'rb') as video_file:
@@ -666,28 +653,16 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text(f"This video is too large to send ({file_size_mb:.2f} MB).\n\nYou can download it directly using this link:", reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 await query.edit_message_text("The video is too large and I couldn't get a direct download link.")
-
     except Exception as e:
         logger.error(f"Video download error for ID {video_id}: {e}")
-        
-        # --- NEW: Fallback logic with download button ---
-        error_message = "An error occurred during the download process. The video may be private or protected."
+        error_message = "An error occurred. The video may be private or protected."
         keyboard = None
-        
-        if info:  # Check if we successfully got the video metadata
-            video_url = info.get('url')
-            if video_url:
-                error_message += "\n\nYou can try watching or downloading it directly using this link:"
-                keyboard = [[InlineKeyboardButton("Watch/Download Video (Direct Link)", url=video_url)]]
-        
-        await query.edit_message_text(
-            error_message, 
-            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
-        )
-        
+        if info and info.get('url'):
+            error_message += "\n\nYou can try watching or downloading it directly:"
+            keyboard = [[InlineKeyboardButton("Watch/Download Video (Direct Link)", url=info.get('url'))]]
+        await query.edit_message_text(error_message, reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
     finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query; await query.answer()
@@ -705,6 +680,27 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(text=f"Okay, send me the full URL for the {platform_name} content.")
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str, platform: str) -> None:
+    if platform.lower() == 'tiktok':
+        feedback = await update.message.reply_text("Analyzing TikTok link...")
+        try:
+            api_url = f"https://tikwm.com/api/?url={content_url}"
+            response = requests.get(api_url, timeout=15).json()
+            if response.get('code') == 0 and 'data' in response:
+                data = response['data']
+                if 'images' in data and data['images']:
+                    await feedback.edit_text(f"Found {len(data['images'])} photos. Sending them now...")
+                    for image_url in data['images']:
+                        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                    await feedback.delete()
+                    return
+                else:
+                    await feedback.edit_text("It's a video. Using the standard downloader...")
+            else:
+                 await feedback.edit_text("Could not fetch details. Trying standard downloader...")
+        except Exception as e:
+            logger.error(f"TikTok API error for {content_url}: {e}")
+            await feedback.edit_text("Could not fetch details. Trying standard downloader...")
+
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir, exist_ok=True)
     try:
@@ -712,7 +708,9 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         if platform.lower() == 'youtube' and os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
         elif os.path.exists('cookies.txt'): ydl_opts['cookiefile'] = 'cookies.txt'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([content_url])
-        downloaded_file_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files: raise Exception("Download failed silently")
+        downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
         await feedback.edit_text("Uploading to Telegram...")
         with open(downloaded_file_path, 'rb') as f:
             await context.bot.send_video(chat_id=update.effective_chat.id, video=f, supports_streaming=True)
