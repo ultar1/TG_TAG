@@ -1,7 +1,7 @@
 # requirements.txt
 
 # Core bot library with extras for rate limiting and webhooks
-python-telegram-bot[rate-limiter,webhooks]
+python-telegram-bot[rate-limiter,job-queue,webhooks]
 
 # Web Server
 Flask
