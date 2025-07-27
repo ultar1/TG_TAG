@@ -25,7 +25,8 @@ from gtts import gTTS
 import random
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter
+# MODIFICATION: Added JobQueue for the auto-ping feature
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter, JobQueue
 from telegram.constants import ParseMode, ChatAction
 from telegram.helpers import escape_markdown
 
@@ -767,6 +768,22 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     response = await asyncio.to_thread(gemini_model.generate_content, prompt)
     await update.message.reply_text(response.text)
 
+# NEW FUNCTION: This job will run on a schedule to keep the bot alive
+async def ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodically pings the bot's webhook to prevent it from spinning down on free hosting."""
+    webhook_url = context.job.data.get("webhook_url")
+    if not webhook_url:
+        logger.warning("Webhook URL not found in job context for ping job. Skipping.")
+        return
+    try:
+        # Use a timeout to avoid hanging forever
+        response = await asyncio.to_thread(requests.get, webhook_url, timeout=20)
+        logger.info(f"Auto-ping successful. Status: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Auto-ping failed: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during auto-ping: {e}")
+
 # --- Message Routing ---
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
@@ -843,7 +860,8 @@ async def handle_suggestion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # --- Main Application Setup ---
 def main() -> None:
-    application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).build()
+    # MODIFICATION: Added .job_queue() to the builder
+    application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).job_queue(JobQueue()).build()
     
     cmd_handlers = [
         CommandHandler("start", start), CommandHandler("help", help_command),
@@ -901,13 +919,33 @@ def main() -> None:
     
     PORT = int(os.environ.get("PORT", 8443))
     RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
+
+    # MODIFICATION: Schedule the ping job only in webhook mode
     if not RENDER_APP_NAME:
         logger.info("Running in polling mode.")
         application.run_polling()
     else:
         WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
         logger.info(f"Running in webhook mode. URL: {WEBHOOK_URL}")
-        application.run_webhook(listen="0.0.0.0", port=PORT, url_path=BOT_TOKEN, webhook_url=WEBHOOK_URL)
+        
+        # Schedule the auto-ping job
+        job_queue = application.job_queue
+        job_queue.run_repeating(
+            callback=ping_job,
+            interval=600,  # 10 minutes (in seconds)
+            first=10,      # Start after 10 seconds
+            name="auto_ping_job",
+            data={"webhook_url": WEBHOOK_URL}
+        )
+        logger.info("Auto-ping job scheduled to run every 10 minutes.")
+        
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=WEBHOOK_URL
+        )
 
 if __name__ == "__main__":
     main()
+
