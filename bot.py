@@ -876,7 +876,9 @@ def setup_application() -> Application:
     return application
 
 # FIX #2: Create the application object at the global scope for Gunicorn
-app = setup_application()
+application = setup_application()
+app = application.asgi_app
+
 
 # This block is for running the bot locally for testing
 # Gunicorn will not execute this part. It only imports the `application` object.
