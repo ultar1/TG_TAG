@@ -487,7 +487,7 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
 
 async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
     # --- FIX: Correctly determine chat_id from either an Update or a CallbackQuery ---
-    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.callback_query.message.chat_id
+    chat_id = update.effective_chat.id if hasattr(update, 'effective_chat') and update.effective_chat else update.message.chat_id
 
     if not query:
         if not context.args:
