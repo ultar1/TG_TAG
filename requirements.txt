@@ -21,6 +21,7 @@ openai
 gTTS
 requests
 beautifulsoup4
+google-cloud-texttospeech
 
 # File and Image Handling
 PyMuPDF
