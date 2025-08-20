@@ -181,7 +181,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/play <song name>**: Search and download a song or video.\n"
         "**/tts <text>**: Convert text to speech.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
-        "**/gmail**: Send an email (Admin only)."
+        "**/gmail**: Send an email (Admin only).\n"
+        "**/connect +<number>**: Connect to a WhatsApp account using a pairing code."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -784,6 +785,77 @@ async def ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"An unexpected error occurred during auto-ping: {e}")
 
+# --- WhatsApp Integration ---
+async def connect_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /connect command to link a WhatsApp account."""
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("Please provide a WhatsApp number. Usage: `/connect +<number>` (e.g., /connect 12345678901).")
+        return
+
+    phone_number = context.args[0].replace('+', '')
+    if not phone_number.isdigit():
+        await update.message.reply_text("Invalid phone number format. Please use digits only.")
+        return
+
+    user_id = update.effective_user.id
+    session_name = f"Ultar_{user_id}"
+    session_path = os.path.join(DOWNLOAD_DIR, session_name)
+    
+    # Check if a session already exists for this user
+    if os.path.exists(session_path):
+        await update.message.reply_text("A session for your account already exists. Please delete it or use the previous one.")
+        return
+
+    feedback_msg = await update.message.reply_text("Generating pairing code...")
+
+    try:
+        # Run the Node.js script as a subprocess
+        process = await asyncio.create_subprocess_exec(
+            "node", "baileys_handler.js", session_name, phone_number,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, stderr = await process.communicate()
+        stdout = stdout.decode('utf-8').strip()
+        
+        if "PAIRING_CODE:" in stdout:
+            code = stdout.split("PAIRING_CODE:")[1].strip()
+            await feedback_msg.edit_text(f"Your WhatsApp pairing code is: `{code}`\n\nOpen WhatsApp, go to `Linked Devices` > `Link with phone number` and enter this code.")
+            
+            # Wait for the connection to be established
+            for _ in range(60): # Wait up to 5 minutes for connection
+                await asyncio.sleep(5)
+                if os.path.exists(os.path.join(session_path, 'creds.json')):
+                    await update.message.reply_text("Connection successful! Sending your session file.")
+                    
+                    # Package the session folder into a zip file
+                    shutil.make_archive(session_path, 'zip', session_path)
+                    
+                    with open(f"{session_path}.zip", "rb") as session_file:
+                        await context.bot.send_document(
+                            chat_id=update.effective_chat.id,
+                            document=session_file,
+                            filename=f"{session_name}.zip",
+                            caption="Your WhatsApp session is ready! Keep this file secure."
+                        )
+                    shutil.rmtree(session_path) # Clean up folder
+                    os.remove(f"{session_path}.zip") # Clean up zip
+                    return
+
+            await update.message.reply_text("Connection timed out. Please try again.")
+
+        else:
+            await feedback_msg.edit_text("Failed to get pairing code. Check the server logs for errors.")
+            logger.error(f"Baileys script error: {stderr.decode('utf-8')}")
+            
+    except FileNotFoundError:
+        await update.message.reply_text("The Node.js environment or Baileys handler script is not set up correctly on the server.")
+    except Exception as e:
+        logger.error(f"An error occurred during WhatsApp connection: {e}")
+        await feedback_msg.edit_text("An unexpected error occurred.")
+
+
 # --- Message Routing ---
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
@@ -864,15 +936,25 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter()).job_queue(JobQueue()).build()
     
     cmd_handlers = [
-        CommandHandler("start", start), CommandHandler("help", help_command),
-        CommandHandler("gemini", gemini_command), CommandHandler("create", create_image_command),
-        CommandHandler("upscale", upscale_image_command), CommandHandler("animate", animate_command),
-        CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
-        CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
-        CommandHandler("riddle", get_riddle), CommandHandler("gmail", gmail_command),
-        CommandHandler("screenshot", screenshot_command), CommandHandler("movie", movie_command),
-        CommandHandler("tts", tts_command), CommandHandler("tiktoksearch", tiktok_search_command),
-        CommandHandler("ytsearch", Youtube_command)
+        CommandHandler("start", start), 
+        CommandHandler("help", help_command),
+        CommandHandler("gemini", gemini_command), 
+        CommandHandler("create", create_image_command),
+        CommandHandler("upscale", upscale_image_command), 
+        CommandHandler("animate", animate_command),
+        CommandHandler("summarize_file", summarize_file_command), 
+        CommandHandler("readtext", read_text_from_image_command),
+        CommandHandler("play", play_command), 
+        CommandHandler("mp4", convert_video_to_audio),
+        CommandHandler("riddle", get_riddle), 
+        CommandHandler("gmail", gmail_command),
+        CommandHandler("screenshot", screenshot_command), 
+        CommandHandler("movie", movie_command),
+        CommandHandler("tts", tts_command), 
+        CommandHandler("tiktoksearch", tiktok_search_command),
+        CommandHandler("ytsearch", Youtube_command),
+        # NEW: Handler for WhatsApp connection
+        CommandHandler("connect", connect_whatsapp)
     ]
     
     menu_button_texts = {
@@ -892,60 +974,4 @@ def main() -> None:
         "Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
         "Download Media": show_download_platform_options,
         "Search Movie": lambda u,c: prompt_for_input(u,c,'awaiting_movie_title', "What movie are you looking for?","Pressed 'Search Movie'"),
-        "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_query', "What do you want to search for on TikTok?","Pressed 'Search TikTok'"),
-        "Youtube": lambda u,c: prompt_for_input(u,c,'awaiting_ytsearch_query', "What do you want to search for on YouTube?","Pressed 'Youtube'"),
-        "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
-        "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
-        "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
-        "Convert Video to Audio": lambda u,c: u.message.reply_text("To use this feature, please reply to a video with the /mp4 command."),
-        "Take Screenshot": lambda u,c: prompt_for_input(u,c,'awaiting_screenshot_url', "Please enter the website URL to capture.","Pressed 'Take Screenshot'"),
-        "Send Email (Admin)": gmail_command,
-    }
-    
-    escaped_patterns = [re.escape(p) for p in menu_button_texts.keys()]
-    msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(pattern)}$"), func) for pattern, func in menu_button_texts.items()]
-    
-    callback_handlers = [
-        CallbackQueryHandler(handle_play_confirmation, pattern="^play_confirm:"),
-        CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"),
-        CallbackQueryHandler(handle_audio_download, pattern="^dl_audio:"),
-        CallbackQueryHandler(handle_video_download, pattern="^dl_video:"),
-        CallbackQueryHandler(handle_platform_selection, pattern="^dl_platform:"),
-        CallbackQueryHandler(handle_tiktok_count_selection, pattern="^tiktok_count:"),
-    ]
-
-    application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(escaped_patterns)})$"), record_user_message))
-    
-    PORT = int(os.environ.get("PORT", 8443))
-    RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
-
-    # MODIFICATION: Schedule the ping job only in webhook mode
-    if not RENDER_APP_NAME:
-        logger.info("Running in polling mode.")
-        application.run_polling()
-    else:
-        WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
-        logger.info(f"Running in webhook mode. URL: {WEBHOOK_URL}")
-        
-        # Schedule the auto-ping job
-        job_queue = application.job_queue
-        job_queue.run_repeating(
-            callback=ping_job,
-            interval=600,  # 10 minutes (in seconds)
-            first=10,      # Start after 10 seconds
-            name="auto_ping_job",
-            data={"webhook_url": WEBHOOK_URL}
-        )
-        logger.info("Auto-ping job scheduled to run every 10 minutes.")
-        
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=WEBHOOK_URL
-        )
-
-if __name__ == "__main__":
-    main()
-
+        "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_
