@@ -23,6 +23,7 @@ import shlex # For smart command parsing
 import re # For robust button handling
 from gtts import gTTS
 import random
+import subprocess # NEW: For running the Node.js script
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 # MODIFICATION: Added JobQueue for the auto-ping feature
@@ -789,7 +790,7 @@ async def ping_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def connect_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /connect command to link a WhatsApp account."""
     if not context.args or len(context.args) < 1:
-        await update.message.reply_text("Please provide a WhatsApp number. Usage: `/connect +<number>` (e.g., /connect 12345678901).")
+        await update.message.reply_text("Please provide a WhatsApp number. Usage: `/connect +<number>` (e.g., /connect +12345678901).")
         return
 
     phone_number = context.args[0].replace('+', '')
@@ -850,9 +851,11 @@ async def connect_whatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.error(f"Baileys script error: {stderr.decode('utf-8')}")
             
     except FileNotFoundError:
-        await update.message.reply_text("The Node.js environment or Baileys handler script is not set up correctly on the server.")
+        # This is a key fix to provide better user feedback
+        await update.message.reply_text("The Node.js environment or `baileys_handler.js` script is not set up correctly. Please ensure both `node` and `baileys_handler.js` are in your bot's directory and executable.")
+        logger.error("FileNotFoundError: The 'node' executable or 'baileys_handler.js' script was not found. Please verify your server setup.")
     except Exception as e:
-        logger.error(f"An error occurred during WhatsApp connection: {e}")
+        logger.error(f"An unexpected error occurred during WhatsApp connection: {e}")
         await feedback_msg.edit_text("An unexpected error occurred.")
 
 
@@ -974,4 +977,59 @@ def main() -> None:
         "Play Music / Video": lambda u,c: prompt_for_input(u,c,'awaiting_song_name', "What song or video would you like?","Pressed 'Play'"),
         "Download Media": show_download_platform_options,
         "Search Movie": lambda u,c: prompt_for_input(u,c,'awaiting_movie_title', "What movie are you looking for?","Pressed 'Search Movie'"),
-        "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_
+        "Search TikTok": lambda u,c: prompt_for_input(u,c,'awaiting_tiktok_query', "What do you want to search for on TikTok?","Pressed 'Search TikTok'"),
+        "Youtube": lambda u,c: prompt_for_input(u,c,'awaiting_ytsearch_query', "What do you want to search for on YouTube?","Pressed 'Youtube'"),
+        "Weather": lambda u,c: prompt_for_input(u,c,'awaiting_city', "Please enter a city name.","Pressed 'Weather'"),
+        "Crypto Prices": lambda u,c: prompt_for_input(u,c,'awaiting_crypto_symbols', "Enter coin IDs separated by commas (e.g., bitcoin,ethereum).","Pressed 'Crypto'"),
+        "Translate Text": lambda u,c: prompt_for_input(u,c,'awaiting_translation_text', "Enter text to translate in the format: <language> <text>","Pressed 'Translate'"),
+        "Convert Video to Audio": lambda u,c: u.message.reply_text("To use this feature, please reply to a video with the /mp4 command."),
+        "Take Screenshot": lambda u,c: prompt_for_input(u,c,'awaiting_screenshot_url', "Please enter the website URL to capture.","Pressed 'Take Screenshot'"),
+        "Send Email (Admin)": gmail_command,
+    }
+    
+    escaped_patterns = [re.escape(p) for p in menu_button_texts.keys()]
+    msg_handlers = [MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(pattern)}$"), func) for pattern, func in menu_button_texts.items()]
+    
+    callback_handlers = [
+        CallbackQueryHandler(handle_play_confirmation, pattern="^play_confirm:"),
+        CallbackQueryHandler(handle_play_cancel, pattern="^play_cancel"),
+        CallbackQueryHandler(handle_audio_download, pattern="^dl_audio:"),
+        CallbackQueryHandler(handle_video_download, pattern="^dl_video:"),
+        CallbackQueryHandler(handle_platform_selection, pattern="^dl_platform:"),
+        CallbackQueryHandler(handle_tiktok_count_selection, pattern="^tiktok_count:"),
+    ]
+
+    application.add_handlers(cmd_handlers + msg_handlers + callback_handlers)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({'|'.join(escaped_patterns)})$"), record_user_message))
+    
+    PORT = int(os.environ.get("PORT", 8443))
+    RENDER_APP_NAME = os.environ.get("RENDER_APP_NAME")
+
+    # MODIFICATION: Schedule the ping job only in webhook mode
+    if not RENDER_APP_NAME:
+        logger.info("Running in polling mode.")
+        application.run_polling()
+    else:
+        WEBHOOK_URL = f"https://{RENDER_APP_NAME}.onrender.com/{BOT_TOKEN}"
+        logger.info(f"Running in webhook mode. URL: {WEBHOOK_URL}")
+        
+        # Schedule the auto-ping job
+        job_queue = application.job_queue
+        job_queue.run_repeating(
+            callback=ping_job,
+            interval=600,  # 10 minutes (in seconds)
+            first=10,      # Start after 10 seconds
+            name="auto_ping_job",
+            data={"webhook_url": WEBHOOK_URL}
+        )
+        logger.info("Auto-ping job scheduled to run every 10 minutes.")
+        
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=WEBHOOK_URL
+        )
+
+if __name__ == "__main__":
+    main()
