@@ -37,6 +37,9 @@ from sqlalchemy.exc import OperationalError, IntegrityError
 from sqlalchemy.types import BigInteger
 import yt_dlp
 
+# NEW: For table formatting
+from prettytable import PrettyTable
+
 # Load environment variables from .env file for local development
 from dotenv import load_dotenv
 load_dotenv()
@@ -186,6 +189,64 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/connect +<number>**: Connect to a WhatsApp account using a pairing code."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+# NEW: Admin command to view database contents
+async def db_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /db command to view database table contents."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Sorry, this command is for the admin only.")
+        return
+    
+    await save_user_to_db(update, context, event_type="Used /db command")
+    context.user_data['state'] = 'awaiting_db_table_name'
+    await update.message.reply_text("Please enter the name of the database table you want to view (e.g., `users`).")
+
+async def view_db_table(update: Update, context: ContextTypes.DEFAULT_TYPE, table_name: str) -> None:
+    """Fetches and formats a database table's contents."""
+    session = Session()
+    feedback = await update.message.reply_text(f"Fetching data from table `{table_name}`...", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        # Check if table exists (a simple way)
+        check_query = f"SELECT 1 FROM {table_name} LIMIT 1;"
+        session.execute(check_query)
+        
+        # Build and execute the main query
+        query = f"SELECT * FROM {table_name};"
+        result = session.execute(query).fetchall()
+        
+        if not result:
+            await feedback.edit_text(f"Table `{table_name}` is empty or does not exist.")
+            return
+
+        # Get column names from the result object
+        column_names = session.execute(query).keys()
+
+        # Create a PrettyTable object
+        table = PrettyTable()
+        table.field_names = column_names
+        
+        for row in result:
+            table.add_row(row)
+            
+        # Format the table string with Markdown
+        formatted_table = "```\n" + str(table) + "\n```"
+
+        # Telegram markdown limit is 4096 characters.
+        if len(formatted_table) > 4000:
+            await feedback.edit_text("The table content is too large to display. Please view it directly from the database.")
+            return
+
+        await feedback.edit_text(formatted_table, parse_mode=ParseMode.MARKDOWN_V2)
+
+    except OperationalError as e:
+        logger.error(f"Database error while viewing table {table_name}: {e}")
+        await feedback.edit_text(f"Database error: The table `{table_name}` may not exist or an invalid query was executed.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while viewing table {table_name}: {e}")
+        await feedback.edit_text("An unexpected error occurred while trying to view the table.")
+    finally:
+        session.close()
 
 async def start_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await save_user_to_db(update, context, event_type="Started AI Chat")
@@ -905,6 +966,11 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif popped_state == 'awaiting_tiktok_query':
         await ask_for_tiktok_count(update, context, text)
         return
+    # NEW: Handle the database table name input
+    elif popped_state == 'awaiting_db_table_name':
+        table_name = text.strip()
+        await view_db_table(update, context, table_name)
+        return
 
     state_handlers = {
         'awaiting_gemini_prompt': lambda: gemini_command(update, context, prompt_text=text),
@@ -957,7 +1023,9 @@ def main() -> None:
         CommandHandler("tiktoksearch", tiktok_search_command),
         CommandHandler("ytsearch", Youtube_command),
         # NEW: Handler for WhatsApp connection
-        CommandHandler("connect", connect_whatsapp)
+        CommandHandler("connect", connect_whatsapp),
+        # NEW: Handler for the /db command
+        CommandHandler("db", db_command)
     ]
     
     menu_button_texts = {
