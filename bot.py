@@ -452,8 +452,8 @@ async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await feedback.edit_text("Sorry, I couldn't create the image.")
 
 async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Upscales an image using the Stability AI API."""
-    # Check if the Stability AI API key is configured, which is also used for animations.
+    """Upscales an image using the latest Stability AI API."""
+    # Check if the Stability AI API key is configured.
     if not STABILITY_API_KEY:
         await update.message.reply_text("Image upscaling service (Stability AI) is not configured.")
         return
@@ -463,65 +463,64 @@ async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Please reply to an image with the `/upscale` command to use this feature.")
         return
 
-    feedback = await update.message.reply_text("🚀 Upscaling your image with Stability AI... this can take a moment.")
+    feedback = await update.message.reply_text("🚀 Upscaling your image with the Stable Ultra model... this can take some time.")
     try:
         # Download the image file from Telegram.
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         image_bytes = await photo_file.download_as_bytearray()
 
-        # Make the API call to Stability AI's upscale endpoint.
+        # THE FIX: Use the new, updated API endpoint for ultra upscaling.
+        # This endpoint returns the image directly, not a JSON object.
         response = requests.post(
-            "https://api.stability.ai/v1/generation/esr-v1/image-to-image/upscale",
+            "https://api.stability.ai/v2/image/upscale",
             headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {STABILITY_API_KEY}"
+                "Authorization": f"Bearer {STABILITY_API_KEY}",
+                "Accept": "image/png" # We request the image directly
             },
             files={
                 "image": image_bytes
             },
-            timeout=90  # Set a generous timeout for the API call.
+            data={
+                "model": "esr-v1-x2plus" # Specify the model in the body instead of the URL
+            },
+            timeout=180  # Increase timeout as this can be a slow process
         )
         # Raise an exception for bad status codes (4xx or 5xx).
         response.raise_for_status()
 
-        data = response.json()
-        
-        # Check if the response contains the expected image data.
-        if "artifacts" in data and len(data["artifacts"]) > 0:
-            # Decode the base64 encoded image.
-            base64_image = data["artifacts"][0]["base64"]
-            upscaled_image_data = base64.b64decode(base64_image)
+        # The response content is the upscaled image data itself.
+        upscaled_image_data = response.content
 
-            # Send the upscaled image back to the user as a document to preserve quality.
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=upscaled_image_data,
-                filename='upscaled_image.png',
-                caption='✨ Here is your upscaled image!'
-            )
-            # Clean up the feedback message.
-            await feedback.delete()
-        else:
-            # Handle cases where the API returns a success status but no image.
-            logger.error("Stability AI API did not return an image artifact.")
-            await feedback.edit_text("The upscaling service did not return an image. Please try again later.")
+        # Send the upscaled image back to the user as a document to preserve quality.
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=upscaled_image_data,
+            filename='upscaled_ultra.png',
+            caption='✨ Here is your ultra-upscaled image!'
+        )
+        # Clean up the feedback message.
+        await feedback.delete()
 
     except requests.exceptions.HTTPError as http_err:
         # Handle specific HTTP errors from the API.
-        error_message = "An API error occurred."
+        error_message = f"API returned an error (Status {http_err.response.status_code})."
         try:
-            # Try to parse a more specific error from the API's JSON response.
-            error_details = http_err.response.json().get('message', 'No details provided.')
+            # Stability's API returns JSON for errors, so we try to parse it.
+            error_data = http_err.response.json()
+            error_details = error_data.get('message') or ", ".join([e.get('name') for e in error_data.get('errors', [])])
             error_message = f"API Error: {error_details}"
         except json.JSONDecodeError:
-            error_message = f"API returned a non-JSON error (Status {http_err.response.status_code})."
+            # If the error isn't JSON, just use the raw text.
+            error_message = f"An unknown API error occurred. Please check the server logs."
         
-        logger.error(f"Stability AI upscale request failed: {error_message}")
+        logger.error(f"Stability AI ultra upscale failed: {error_message} - {http_err.response.text}")
         await feedback.edit_text(f"Sorry, I couldn't upscale the image. {error_message}")
     except Exception as e:
         # Catch any other unexpected errors.
         logger.error(f"Unexpected error in upscale_command: {e}")
         await feedback.edit_text("An unexpected error occurred while upscaling the image.")
+
+
 
 
 async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
