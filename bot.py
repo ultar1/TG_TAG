@@ -7,6 +7,7 @@ import sys
 import asyncio
 import uuid
 import shutil
+import time
 import requests
 import json
 from bs4 import BeautifulSoup
@@ -60,6 +61,7 @@ GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 # Other API Keys
 CLIPDROP_API_KEY = os.environ.get("CLIPDROP_API_KEY")
+REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN")
 STABILITY_API_KEY = os.environ.get("STABILITY_API_KEY")
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 SCREENSHOT_API_KEY = os.environ.get("SCREENSHOT_API_KEY")
@@ -451,11 +453,14 @@ async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"DALL-E 3 API error: {e}")
         await feedback.edit_text("Sorry, I couldn't create the image.")
 
+a# You will need to import the `time` module if it's not already there.
+# Add `import time` at the top of your file with the other imports.
+
 async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Upscales an image using the latest Stability AI API."""
-    # Check if the Stability AI API key is configured.
-    if not STABILITY_API_KEY:
-        await update.message.reply_text("Image upscaling service (Stability AI) is not configured.")
+    """Upscales an image using the Replicate API with Real-ESRGAN."""
+    # Check if the Replicate API key is configured.
+    if not REPLICATE_API_TOKEN:
+        await update.message.reply_text("Image upscaling service (Replicate) is not configured.")
         return
 
     # Ensure the user is replying to a photo.
@@ -463,62 +468,71 @@ async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Please reply to an image with the `/upscale` command to use this feature.")
         return
 
-    feedback = await update.message.reply_text("🚀 Upscaling your image with the Stable Ultra model... this can take some time.")
+    feedback = await update.message.reply_text("🚀 Sending image to Replicate for upscaling...")
     try:
         # Download the image file from Telegram.
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         image_bytes = await photo_file.download_as_bytearray()
+        
+        # Convert image to a base64 data URI, which the API accepts.
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        data_uri = f"data:image/png;base64,{b64_image}"
 
-        # THE FIX: Use the new, updated API endpoint for ultra upscaling.
-        # This endpoint returns the image directly, not a JSON object.
-        response = requests.post(
-            "https://api.stability.ai/v2/image/upscale",
+        # Step 1: Start the prediction job on Replicate
+        start_response = requests.post(
+            "https://api.replicate.com/v1/predictions",
             headers={
-                "Authorization": f"Bearer {STABILITY_API_KEY}",
-                "Accept": "image/png" # We request the image directly
+                "Authorization": f"Token {REPLICATE_API_TOKEN}",
+                "Content-Type": "application/json",
             },
-            files={
-                "image": image_bytes
+            json={
+                # This is the specific version of the Real-ESRGAN model
+                "version": "42fed1c4974146d4d2414e2be2c5236e7a8c90531b54541756316998143e4034",
+                "input": {"img": data_uri, "scale": 4}, # Upscale by 4x
             },
-            data={
-                "model": "esr-v1-x2plus" # Specify the model in the body instead of the URL
-            },
-            timeout=180  # Increase timeout as this can be a slow process
         )
-        # Raise an exception for bad status codes (4xx or 5xx).
-        response.raise_for_status()
+        start_response.raise_for_status()
+        start_data = start_response.json()
+        prediction_url = start_data["urls"]["get"]
 
-        # The response content is the upscaled image data itself.
-        upscaled_image_data = response.content
+        await feedback.edit_text("⏳ Image received. Upscaling job started... this may take a minute.")
 
-        # Send the upscaled image back to the user as a document to preserve quality.
+        # Step 2: Poll the prediction URL until it's done
+        result_data = {}
+        for _ in range(60): # Timeout after ~2 minutes
+            await asyncio.sleep(2) # Wait for 2 seconds between checks
+            poll_response = requests.get(
+                prediction_url,
+                headers={"Authorization": f"Token {REPLICATE_API_TOKEN}"}
+            )
+            poll_response.raise_for_status()
+            result_data = poll_response.json()
+
+            if result_data["status"] == "succeeded":
+                break
+            elif result_data["status"] in ["failed", "canceled"]:
+                raise Exception(f"Replicate job failed: {result_data.get('error', 'Unknown error')}")
+        
+        if result_data.get("status") != "succeeded" or not result_data.get("output"):
+             raise Exception("Upscaling job timed out or did not succeed.")
+
+        # Step 3: Send the result
+        final_image_url = result_data["output"]
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
-            document=upscaled_image_data,
-            filename='upscaled_ultra.png',
-            caption='✨ Here is your ultra-upscaled image!'
+            document=final_image_url,
+            filename='upscaled_replicate.png',
+            caption='✨ Here is your upscaled image, powered by Replicate!'
         )
-        # Clean up the feedback message.
         await feedback.delete()
 
     except requests.exceptions.HTTPError as http_err:
-        # Handle specific HTTP errors from the API.
-        error_message = f"API returned an error (Status {http_err.response.status_code})."
-        try:
-            # Stability's API returns JSON for errors, so we try to parse it.
-            error_data = http_err.response.json()
-            error_details = error_data.get('message') or ", ".join([e.get('name') for e in error_data.get('errors', [])])
-            error_message = f"API Error: {error_details}"
-        except json.JSONDecodeError:
-            # If the error isn't JSON, just use the raw text.
-            error_message = f"An unknown API error occurred. Please check the server logs."
-        
-        logger.error(f"Stability AI ultra upscale failed: {error_message} - {http_err.response.text}")
-        await feedback.edit_text(f"Sorry, I couldn't upscale the image. {error_message}")
+        logger.error(f"Replicate API request failed: {http_err} - {http_err.response.text}")
+        await feedback.edit_text(f"Sorry, an API error occurred: {http_err.response.json().get('detail', 'Please check logs.')}")
     except Exception as e:
-        # Catch any other unexpected errors.
         logger.error(f"Unexpected error in upscale_command: {e}")
-        await feedback.edit_text("An unexpected error occurred while upscaling the image.")
+        await feedback.edit_text(f"An unexpected error occurred: {e}")
+
 
 
 
