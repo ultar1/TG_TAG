@@ -452,18 +452,77 @@ async def create_image_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await feedback.edit_text("Sorry, I couldn't create the image.")
 
 async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not CLIPDROP_API_KEY: await update.message.reply_text("Image upscaling service not configured."); return
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo: await update.message.reply_text("Please reply to an image with /upscale."); return
-    feedback = await update.message.reply_text("Upscaling your image...")
+    """Upscales an image using the Stability AI API."""
+    # Check if the Stability AI API key is configured, which is also used for animations.
+    if not STABILITY_API_KEY:
+        await update.message.reply_text("Image upscaling service (Stability AI) is not configured.")
+        return
+
+    # Ensure the user is replying to a photo.
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text("Please reply to an image with the `/upscale` command to use this feature.")
+        return
+
+    feedback = await update.message.reply_text("🚀 Upscaling your image with Stability AI... this can take a moment.")
     try:
+        # Download the image file from Telegram.
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
-        response = requests.post('https://clipdrop-api.co/image-upscaling/v1/upscale', files={'image_file': await photo_file.download_as_bytearray()}, headers={'x-api-key': CLIPDROP_API_KEY}, timeout=90)
+        image_bytes = await photo_file.download_as_bytearray()
+
+        # Make the API call to Stability AI's upscale endpoint.
+        response = requests.post(
+            "https://api.stability.ai/v1/generation/esr-v1/image-to-image/upscale",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {STABILITY_API_KEY}"
+            },
+            files={
+                "image": image_bytes
+            },
+            timeout=90  # Set a generous timeout for the API call.
+        )
+        # Raise an exception for bad status codes (4xx or 5xx).
         response.raise_for_status()
-        await context.bot.send_document(update.effective_chat.id, response.content, filename='upscaled.png', caption='Here is your upscaled image!')
-        await feedback.delete()
+
+        data = response.json()
+        
+        # Check if the response contains the expected image data.
+        if "artifacts" in data and len(data["artifacts"]) > 0:
+            # Decode the base64 encoded image.
+            base64_image = data["artifacts"][0]["base64"]
+            upscaled_image_data = base64.b64decode(base64_image)
+
+            # Send the upscaled image back to the user as a document to preserve quality.
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=upscaled_image_data,
+                filename='upscaled_image.png',
+                caption='✨ Here is your upscaled image!'
+            )
+            # Clean up the feedback message.
+            await feedback.delete()
+        else:
+            # Handle cases where the API returns a success status but no image.
+            logger.error("Stability AI API did not return an image artifact.")
+            await feedback.edit_text("The upscaling service did not return an image. Please try again later.")
+
+    except requests.exceptions.HTTPError as http_err:
+        # Handle specific HTTP errors from the API.
+        error_message = "An API error occurred."
+        try:
+            # Try to parse a more specific error from the API's JSON response.
+            error_details = http_err.response.json().get('message', 'No details provided.')
+            error_message = f"API Error: {error_details}"
+        except json.JSONDecodeError:
+            error_message = f"API returned a non-JSON error (Status {http_err.response.status_code})."
+        
+        logger.error(f"Stability AI upscale request failed: {error_message}")
+        await feedback.edit_text(f"Sorry, I couldn't upscale the image. {error_message}")
     except Exception as e:
-        logger.error(f"ClipDrop API Error: {e}")
-        await feedback.edit_text("Sorry, an error occurred while upscaling.")
+        # Catch any other unexpected errors.
+        logger.error(f"Unexpected error in upscale_command: {e}")
+        await feedback.edit_text("An unexpected error occurred while upscaling the image.")
+
 
 async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not STABILITY_API_KEY: await update.message.reply_text("Video animation service not configured."); return
