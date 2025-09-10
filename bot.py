@@ -287,7 +287,7 @@ async def resend_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"Stopping recurring email job {job.name} as it has reached the stop day.")
         await context.bot.send_message(
             chat_id=data['chat_id'], 
-            text=f"Recurring email to *{escape_markdown(data['to'], version=2)}* has now stopped as scheduled.", 
+            text=f"Recurring email to *{escape_markdown(data['to'], version=2)}* has now stopped as scheduled\.", 
             parse_mode=ParseMode.MARKDOWN_V2
         )
         job.schedule_removal()
@@ -309,7 +309,7 @@ async def resend_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Failed to send email via job {job.name}: {e}")
         await context.bot.send_message(
             chat_id=data['chat_id'], 
-            text=f"⚠️ Failed to send recurring email to *{escape_markdown(data['to'], version=2)}*.", 
+            text=f"⚠️ Failed to send recurring email to *{escape_markdown(data['to'], version=2)}*\.", 
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -334,8 +334,6 @@ async def handle_resend_interval_selection(update: Update, context: ContextTypes
     keyboard.append(days_buttons[4:])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # FIXED: Added MarkdownV2 and escaped special characters '!' and '.'
     await query.edit_message_text(
         f"Great\! The email will be resent every {interval // 60} minutes\.\n\nOn which day should it stop?", 
         reply_markup=reply_markup,
@@ -377,13 +375,10 @@ async def handle_resend_stop_day_selection(update: Update, context: ContextTypes
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     stop_day_name = days[stop_day_index]
     
-    # FIXED: Escaped the final '.' character.
     await query.edit_message_text(
         f"✅ All set\! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes\. This will stop on *{stop_day_name}*\.", 
         parse_mode=ParseMode.MARKDOWN_V2
     )
-
-
 
 async def handle_resend_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancels the resend setup."""
@@ -686,56 +681,99 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text_t
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
 
-async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None, count: int = 5) -> None:
-    chat_id = update.effective_chat.id
-    if not query:
-        query = " ".join(context.args)
-        if not query:
-            await context.bot.send_message(chat_id, "Please provide a search term.")
-            return
-        await ask_for_tiktok_count(update, context, query)
-        return
-    feedback = await context.bot.send_message(chat_id=chat_id, text=f"Searching TikTok for '{query}'...")
-    try:
-        response = requests.post(
-            'https://tikwm.com/api/feed/search',
-            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
-            data={'keywords': query, 'count': '20'},
-            timeout=20,
-        )
-        response.raise_for_status()
-        videos = response.json().get('data', {}).get('videos', [])
-        if not videos:
-            await feedback.edit_text("No TikTok videos found.")
-            return
-        await feedback.edit_text(f"Found {len(videos)} videos. Sending {count} of them...")
-        random.shuffle(videos)
-        for video in videos[:count]:
-            if video.get('play'):
-                await context.bot.send_video(chat_id=chat_id, video=video['play'], caption=video.get('title', ''))
-    except Exception as e:
-        logger.error(f"TikTok search failed: {e}")
-        await feedback.edit_text("An unexpected error occurred.")
+# --- NEW: Corrected and Improved TikTok Search Functions ---
 
-async def ask_for_tiktok_count(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+async def tiktok_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles the /tiktoksearch command. 
+    It extracts the query from the user's message and proceeds to ask for the video count.
+    """
+    query = " ".join(context.args)
+    if not query:
+        # If the user just types /tiktoksearch, prompt them for a query via the state handler.
+        await prompt_for_input(
+            update, 
+            context, 
+            state='awaiting_tiktok_query', 
+            message="What would you like to search for on TikTok?", 
+            event="Used /tiktoksearch"
+        )
+        return
+    
+    # If a query was provided (e.g., /tiktoksearch funny cats), ask for the count directly.
+    await ask_for_tiktok_count(update, context, query)
+
+async def ask_for_tiktok_count(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    """
+    Asks the user how many videos they want to receive for a given search query.
+    """
     context.user_data['tiktok_query'] = query
+    
     keyboard = [[
         InlineKeyboardButton("3", callback_data="tiktok_count:3"),
         InlineKeyboardButton("5", callback_data="tiktok_count:5"),
         InlineKeyboardButton("10", callback_data="tiktok_count:10")
     ]]
-    await update.message.reply_text(f"How many videos for '{query}'?", reply_markup=InlineKeyboardMarkup(keyboard))
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(f"How many videos for '{query}'?", reply_markup=reply_markup)
 
 async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles the button press for the video count, performs the API call, and sends the videos.
+    """
     cb_query = update.callback_query
     await cb_query.answer()
+    
     count = int(cb_query.data.split(":")[1])
     search_query = context.user_data.pop('tiktok_query', None)
+    
     if not search_query:
-        await cb_query.edit_message_text("Search expired. Please try again.")
+        await cb_query.edit_message_text("This search has expired. Please try again.")
         return
-    await cb_query.edit_message_text("Starting your search...")
-    await tiktok_search_command(cb_query, context, query=search_query, count=count)
+
+    await cb_query.edit_message_text(f"Searching TikTok for '{search_query}'...")
+    
+    try:
+        response = requests.post(
+            'https://tikwm.com/api/feed/search',
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+            data={'keywords': search_query, 'count': '20'},
+            timeout=20,
+        )
+        response.raise_for_status()
+        videos = response.json().get('data', {}).get('videos', [])
+        
+        if not videos:
+            await cb_query.edit_message_text("No TikTok videos found for that search.")
+            return
+
+        await cb_query.edit_message_text(f"Found {len(videos)} videos. Sending the top {count} of them...")
+        
+        random.shuffle(videos)
+        sent_count = 0
+        for video in videos:
+            if sent_count >= count:
+                break
+            if video.get('play'):
+                try:
+                    await context.bot.send_video(
+                        chat_id=cb_query.message.chat_id, 
+                        video=video['play'], 
+                        caption=video.get('title', '')
+                    )
+                    sent_count += 1
+                except Exception as send_error:
+                    logger.error(f"Failed to send a TikTok video: {send_error}")
+        
+        if sent_count == 0:
+             await cb_query.edit_message_text("Found videos, but was unable to send any of them. They may be protected.")
+
+    except Exception as e:
+        logger.error(f"TikTok search failed: {e}")
+        await cb_query.edit_message_text("An unexpected error occurred while searching TikTok.")
+        
+# --- END NEW TikTok Functions ---
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
     if not query:
@@ -992,28 +1030,16 @@ async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: s
         response = requests.get(search_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # FIXED: Updated the selector to find books based on the new website structure.
-        results = soup.find_all('div', {'data-book-id': True}, limit=5)
-        
+        results = soup.find_all('div', class_='book-card', limit=5)
         if not results:
             await feedback.edit_text("Sorry, I couldn't find any novels matching that title.")
             return
-            
         keyboard = []
         for book in results:
-            link_tag = book.find('a')
-            title_tag = book.find('h2')
-            if link_tag and title_tag:
-                title = title_tag.get_text(strip=True)
-                book_page_url = f"https://www.pdfroom.com{link_tag['href']}"
-                button_text = (title[:60] + '..') if len(title) > 60 else title
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
-                
-        if not keyboard:
-            await feedback.edit_text("Couldn't parse the novel search results. The website may have changed.")
-            return
-            
+            title = book.find('h5').get_text(strip=True)
+            book_page_url = f"https://www.pdfroom.com{book.find('a')['href']}"
+            button_text = (title[:60] + '..') if len(title) > 60 else title
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
         await feedback.edit_text("Top results. Choose one to download:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Novel search failed: {e}")
@@ -1029,34 +1055,14 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
         response = requests.get(book_page_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # FIXED: Updated the selector to find the download link using a more robust method (regular expression).
-        download_tag = soup.find('a', href=re.compile(r'^/download/'))
-        
-        if not download_tag:
-            await feedback.edit_text("Could not find the download link on the page. The website may have changed.")
-            return
-
-        download_link = f"https://www.pdfroom.com{download_tag['href']}"
-        
+        download_link = f"https://www.pdfroom.com{soup.find('a', id='download-button')['href']}"
         await feedback.edit_text("Downloading PDF... this may take a while.")
         pdf_response = requests.get(download_link, headers=headers, timeout=120)
         pdf_response.raise_for_status()
-        
-        # Extract filename from the URL or header if possible, otherwise use a default.
-        filename = "novel.pdf"
-        if 'content-disposition' in pdf_response.headers:
-            d = pdf_response.headers['content-disposition']
-            fname = re.findall("filename=\"(.+)\"", d)
-            if fname:
-                filename = fname[0]
-        else:
-            filename = download_link.split('/')[-1] + ".pdf"
-            
+        filename = download_link.split('/')[-1] or "novel.pdf"
         if len(pdf_response.content) > 50 * 1024 * 1024:
             await feedback.edit_text(f"File is too large for Telegram. Download directly: {download_link}")
             return
-            
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_response.content,
@@ -1067,7 +1073,6 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Novel download failed: {e}")
         await feedback.edit_text(f"An error occurred during download: {e}")
-
 
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
@@ -1098,7 +1103,6 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         feedback = await update.message.reply_text(f"Sending email to {to}...")
         msg = EmailMessage()
         msg.set_content(text)
-        # The 'to' variable can be "a@b.com" or "a@b.com, c@d.com" and it works perfectly.
         msg['Subject'], msg['From'], msg['To'] = subject, GMAIL_ADDRESS, to
         try:
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
@@ -1144,6 +1148,8 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             'awaiting_ytsearch_query': lambda: youtube_command(update, context, query=text),
             'awaiting_suggestion': lambda: handle_suggestion(update, context, suggestion=text),
             'awaiting_db_table_name': lambda: view_db_table(update, context, table_name=text),
+            # NEW: This line fixes the TikTok search loop by wiring the user's text input to the next step.
+            'awaiting_tiktok_query': lambda: ask_for_tiktok_count(update, context, query=text),
         }
         if popped_state in state_handlers:
             await state_handlers[popped_state]()
