@@ -24,8 +24,8 @@ import shlex # For smart command parsing
 import re # For robust button handling
 from gtts import gTTS
 import random
-import subprocess # NEW: For running the Node.js script
-import datetime # NEW: For the recurring email job
+import subprocess # For running the Node.js script
+import datetime # For the recurring email job
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter, JobQueue
@@ -273,7 +273,6 @@ async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("The email service is not configured.")
         return
     context.user_data['state'] = 'awaiting_email_address'
-    # MODIFIED: Updated prompt to ask for multiple emails.
     await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.\n\nFor multiple recipients, separate them with commas.")
 
 # --- Functions for recurring email feature ---
@@ -372,8 +371,9 @@ async def handle_resend_stop_day_selection(update: Update, context: ContextTypes
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     stop_day_name = days[stop_day_index]
     
+    # FIXED: Escaped the '!' character with a '\'
     await query.edit_message_text(
-        f"✅ All set! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes. This will stop on *{stop_day_name}*.", 
+        f"✅ All set\! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes. This will stop on *{stop_day_name}*.", 
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
