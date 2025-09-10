@@ -992,16 +992,28 @@ async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: s
         response = requests.get(search_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        results = soup.find_all('div', class_='book-card', limit=5)
+        
+        # FIXED: Updated the selector to find books based on the new website structure.
+        results = soup.find_all('div', {'data-book-id': True}, limit=5)
+        
         if not results:
             await feedback.edit_text("Sorry, I couldn't find any novels matching that title.")
             return
+            
         keyboard = []
         for book in results:
-            title = book.find('h5').get_text(strip=True)
-            book_page_url = f"https://www.pdfroom.com{book.find('a')['href']}"
-            button_text = (title[:60] + '..') if len(title) > 60 else title
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
+            link_tag = book.find('a')
+            title_tag = book.find('h2')
+            if link_tag and title_tag:
+                title = title_tag.get_text(strip=True)
+                book_page_url = f"https://www.pdfroom.com{link_tag['href']}"
+                button_text = (title[:60] + '..') if len(title) > 60 else title
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
+                
+        if not keyboard:
+            await feedback.edit_text("Couldn't parse the novel search results. The website may have changed.")
+            return
+            
         await feedback.edit_text("Top results. Choose one to download:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Novel search failed: {e}")
@@ -1017,14 +1029,34 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
         response = requests.get(book_page_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        download_link = f"https://www.pdfroom.com{soup.find('a', id='download-button')['href']}"
+        
+        # FIXED: Updated the selector to find the download link using a more robust method (regular expression).
+        download_tag = soup.find('a', href=re.compile(r'^/download/'))
+        
+        if not download_tag:
+            await feedback.edit_text("Could not find the download link on the page. The website may have changed.")
+            return
+
+        download_link = f"https://www.pdfroom.com{download_tag['href']}"
+        
         await feedback.edit_text("Downloading PDF... this may take a while.")
         pdf_response = requests.get(download_link, headers=headers, timeout=120)
         pdf_response.raise_for_status()
-        filename = download_link.split('/')[-1] or "novel.pdf"
+        
+        # Extract filename from the URL or header if possible, otherwise use a default.
+        filename = "novel.pdf"
+        if 'content-disposition' in pdf_response.headers:
+            d = pdf_response.headers['content-disposition']
+            fname = re.findall("filename=\"(.+)\"", d)
+            if fname:
+                filename = fname[0]
+        else:
+            filename = download_link.split('/')[-1] + ".pdf"
+            
         if len(pdf_response.content) > 50 * 1024 * 1024:
             await feedback.edit_text(f"File is too large for Telegram. Download directly: {download_link}")
             return
+            
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_response.content,
@@ -1035,6 +1067,7 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Novel download failed: {e}")
         await feedback.edit_text(f"An error occurred during download: {e}")
+
 
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
