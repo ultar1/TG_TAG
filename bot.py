@@ -285,9 +285,10 @@ async def resend_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # weekday() returns 0 for Monday and 6 for Sunday.
     if datetime.datetime.now().weekday() == data['stop_day_index']:
         logger.info(f"Stopping recurring email job {job.name} as it has reached the stop day.")
+        # FIXED: Escaped the period at the end of the sentence.
         await context.bot.send_message(
             chat_id=data['chat_id'], 
-            text=f"Recurring email to *{escape_markdown(data['to'], version=2)}* has now stopped as scheduled.", 
+            text=f"Recurring email to *{escape_markdown(data['to'], version=2)}* has now stopped as scheduled\.", 
             parse_mode=ParseMode.MARKDOWN_V2
         )
         job.schedule_removal()
@@ -307,9 +308,10 @@ async def resend_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"Successfully resent email via job {job.name}")
     except Exception as e:
         logger.error(f"Failed to send email via job {job.name}: {e}")
+        # FIXED: Escaped the period at the end of the sentence.
         await context.bot.send_message(
             chat_id=data['chat_id'], 
-            text=f"⚠️ Failed to send recurring email to *{escape_markdown(data['to'], version=2)}*.", 
+            text=f"⚠️ Failed to send recurring email to *{escape_markdown(data['to'], version=2)}*\.", 
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -371,9 +373,9 @@ async def handle_resend_stop_day_selection(update: Update, context: ContextTypes
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     stop_day_name = days[stop_day_index]
     
-    # FIXED: Escaped the '!' character with a '\'
+    # FIXED: Escaped the period at the end of the sentence.
     await query.edit_message_text(
-        f"✅ All set\! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes. This will stop on *{stop_day_name}*.", 
+        f"✅ All set\! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes. This will stop on *{stop_day_name}*\.", 
         parse_mode=ParseMode.MARKDOWN_V2
     )
 
