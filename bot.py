@@ -25,6 +25,7 @@ import re # For robust button handling
 from gtts import gTTS
 import random
 import subprocess # NEW: For running the Node.js script
+import datetime # NEW: For the recurring email job
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler, AIORateLimiter, JobQueue
@@ -272,7 +273,125 @@ async def gmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("The email service is not configured.")
         return
     context.user_data['state'] = 'awaiting_email_address'
-    await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.")
+    # MODIFIED: Updated prompt to ask for multiple emails.
+    await update.message.reply_text("Step 1 of 3: Please enter the recipient's email address.\n\nFor multiple recipients, separate them with commas.")
+
+# --- Functions for recurring email feature ---
+
+async def resend_email_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The job function that resends the email."""
+    job = context.job
+    data = job.data
+    
+    # weekday() returns 0 for Monday and 6 for Sunday.
+    if datetime.datetime.now().weekday() == data['stop_day_index']:
+        logger.info(f"Stopping recurring email job {job.name} as it has reached the stop day.")
+        await context.bot.send_message(
+            chat_id=data['chat_id'], 
+            text=f"Recurring email to *{escape_markdown(data['to'], version=2)}* has now stopped as scheduled.", 
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        job.schedule_removal()
+        return
+
+    logger.info(f"Running recurring email job {job.name} to {data['to']}")
+    msg = EmailMessage()
+    msg.set_content(data['body'])
+    msg['Subject'] = data['subject']
+    msg['From'] = GMAIL_ADDRESS
+    msg['To'] = data['to'] # This string can contain comma-separated addresses
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+            s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            s.send_message(msg)
+        logger.info(f"Successfully resent email via job {job.name}")
+    except Exception as e:
+        logger.error(f"Failed to send email via job {job.name}: {e}")
+        await context.bot.send_message(
+            chat_id=data['chat_id'], 
+            text=f"⚠️ Failed to send recurring email to *{escape_markdown(data['to'], version=2)}*.", 
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+async def handle_resend_interval_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the user's selection of the resend interval."""
+    query = update.callback_query
+    await query.answer()
+
+    _, interval_str, job_id = query.data.split(':', 2)
+    interval = int(interval_str)
+
+    if job_id not in context.chat_data:
+        await query.edit_message_text("This request has expired. Please try sending the email again.")
+        return
+
+    context.chat_data[job_id]['interval'] = interval
+
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    keyboard = []
+    days_buttons = [InlineKeyboardButton(day, callback_data=f"resend_stop:{i}:{job_id}") for i, day in enumerate(days)]
+    keyboard.append(days_buttons[:4])
+    keyboard.append(days_buttons[4:])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(f"Great! The email will be resent every {interval // 60} minutes.\n\nOn which day should it stop?", reply_markup=reply_markup)
+
+async def handle_resend_stop_day_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the user's selection of the stop day and schedules the job."""
+    query = update.callback_query
+    await query.answer()
+
+    _, stop_day_index_str, job_id = query.data.split(':', 2)
+    stop_day_index = int(stop_day_index_str)
+
+    if job_id not in context.chat_data or 'interval' not in context.chat_data.get(job_id, {}):
+        await query.edit_message_text("This request has expired or is incomplete. Please try sending the email again.")
+        return
+        
+    email_data = context.chat_data.pop(job_id)
+    
+    job_data = {
+        'chat_id': query.message.chat_id,
+        'to': email_data['to'],
+        'subject': email_data['subject'],
+        'body': email_data['body'],
+        'stop_day_index': stop_day_index
+    }
+    
+    interval = email_data['interval']
+    
+    context.job_queue.run_repeating(
+        resend_email_job,
+        interval=interval,
+        first=interval,
+        data=job_data,
+        name=f"email_{job_id}"
+    )
+    
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    stop_day_name = days[stop_day_index]
+    
+    await query.edit_message_text(
+        f"✅ All set! I will resend the email to *{escape_markdown(email_data['to'], version=2)}* every {interval // 60} minutes. This will stop on *{stop_day_name}*.", 
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def handle_resend_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancels the resend setup."""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        _, job_id = query.data.split(':', 1)
+        if job_id in context.chat_data:
+            del context.chat_data[job_id]
+    except (ValueError, KeyError):
+        pass
+        
+    await query.edit_message_text("Okay, no recurring email will be sent.")
+
+# --- END of recurring email functions ---
 
 async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str = None) -> None:
     if not TMDB_API_KEY:
@@ -938,12 +1057,32 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         feedback = await update.message.reply_text(f"Sending email to {to}...")
         msg = EmailMessage()
         msg.set_content(text)
+        # The 'to' variable can be "a@b.com" or "a@b.com, c@d.com" and it works perfectly.
         msg['Subject'], msg['From'], msg['To'] = subject, GMAIL_ADDRESS, to
         try:
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
                 s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
                 s.send_message(msg)
             await feedback.edit_text("Email sent successfully!")
+
+            # --- Recurring Email Feature ---
+            job_id = str(uuid.uuid4())
+            context.chat_data[job_id] = {'to': to, 'subject': subject, 'body': text}
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("5 mins", callback_data=f"resend_interval:300:{job_id}"),
+                    InlineKeyboardButton("10 mins", callback_data=f"resend_interval:600:{job_id}"),
+                    InlineKeyboardButton("15 mins", callback_data=f"resend_interval:900:{job_id}"),
+                ],
+                [InlineKeyboardButton("No, thanks", callback_data=f"resend_cancel:{job_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "Would you like to resend this email periodically?",
+                reply_markup=reply_markup
+            )
+
         except Exception as e:
             logger.error(f"Failed to send email: {e}")
             await feedback.edit_text("Failed to send email.")
@@ -1027,6 +1166,10 @@ def main() -> None:
         CallbackQueryHandler(handle_platform_selection, pattern="^dl_platform:"),
         CallbackQueryHandler(handle_tiktok_count_selection, pattern="^tiktok_count:"),
         CallbackQueryHandler(handle_novel_download, pattern="^novel_dl:"),
+        # --- HANDLERS for recurring email ---
+        CallbackQueryHandler(handle_resend_interval_selection, pattern="^resend_interval:"),
+        CallbackQueryHandler(handle_resend_stop_day_selection, pattern="^resend_stop:"),
+        CallbackQueryHandler(handle_resend_cancel, pattern="^resend_cancel:"),
     ]
 
     application.add_handlers(cmd_handlers)
@@ -1050,4 +1193,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
