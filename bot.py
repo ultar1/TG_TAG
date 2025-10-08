@@ -557,17 +557,26 @@ async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TY
         image_bytes = await photo_file.download_as_bytearray()
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         data_uri = f"data:image/png;base64,{b64_image}"
+        
+        # --- UPSCALE 4K FIX APPLIED: Request max scale and enhance details ---
         start_response = requests.post(
             "https://api.replicate.com/v1/predictions",
             headers={"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"},
             json={
+                # Stable Diffusion's 4x upscaler model
                 "version": "42fed1c4974146d4d2414e2be2c5236e7a8c90531b54541756316998143e4034",
-                "input": {"img": data_uri, "scale": 4},
+                "input": {
+                    "img": data_uri, 
+                    "scale": 4, # Maximum scale factor for this model (4x)
+                    "face_enhance": True # Enhance details for higher perceived quality
+                },
             },
         )
+        # --- END FIX ---
+        
         start_response.raise_for_status()
         prediction_url = start_response.json()["urls"]["get"]
-        await feedback.edit_text("⏳ Upscaling job started... this may take a minute.")
+        await feedback.edit_text("⏳ Upscaling job started... this may take a minute. Output is 4x resolution, aiming for 4K-like detail.")
         result_data = {}
         for _ in range(60):
             await asyncio.sleep(2)
@@ -584,8 +593,8 @@ async def upscale_image_command(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=final_image_url,
-            filename='upscaled_replicate.png',
-            caption='✨ Here is your upscaled image, powered by Replicate!'
+            filename='upscaled_replicate_4x.png',
+            caption='✨ Here is your upscaled 4x image, powered by Replicate!'
         )
         await feedback.delete()
     except Exception as e:
@@ -934,54 +943,61 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['platform'] = platform
     await query.edit_message_text(f"Send me the {platform} URL.")
 
-# --- TIKTOK IMAGE FIX: New Function using a different API ---
+# --- TIKTOK IMAGE FIX: New Function using an alternative public API ---
 async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """
     Downloads images from a TikTok 'photo dump' post using a dedicated API.
     """
     feedback = await update.message.reply_text("Attempting to download TikTok images...")
     
-    # Using a new, more reliable TikTok downloader API (tikdown.one is often reliable)
-    # Note: TikTok APIs can change frequently, so this might need updating again if it fails.
-    api_url = 'https://downloader.api.tikdown.one/api/v2/dl'
+    # Using the ssstik.io API for better reliability with different media types
+    # Note: TikTok APIs are fragile and this might need future updates.
+    api_url = 'https://ssstik.io/api/dl'
     
     try:
-        # Step 1: Get the video/photo details
-        get_response = requests.get(api_url, params={'url': url}, timeout=20)
-        get_response.raise_for_status()
-        data = get_response.json()
+        # ssstik.io requires a POST request with the URL in the form data
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Referer': 'https://ssstik.io/',
+        }
         
-        if data.get('error'):
-            error_msg = data.get('message', 'API download failed.')
-            await feedback.edit_text(f"TikTok API failed: {error_msg}. Falling back to video download.")
-            await download_content_from_url(update, context, url, 'TikTok') # Fallback
-            return
-
-        item = data.get('data', {})
-        images = item.get('images', [])
-
-        if not images:
-            # No images found, fall back to video download (might be a standard video)
-            await feedback.edit_text("No images found, falling back to video download.")
-            await download_content_from_url(update, context, url, 'TikTok')
-            return
+        response = requests.post(api_url, data={'url': url, 'type': 'photo'}, headers=headers, timeout=20)
+        response.raise_for_status()
         
+        # Parse HTML to find download links (ssstik often returns HTML chunks)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Look for image download elements
+        image_links = [img['src'] for img in soup.find_all('img', {'loading': 'lazy'}) if 'c.y-cdn.net/dl/image' in img.get('src', '')]
+        
+        if not image_links:
+            # Check for video download links as a fallback for standard videos
+            video_link = soup.find('a', {'href': lambda href: href and 'tiktokcdn' in href and 'nowatermark' in href})
+            
+            if video_link:
+                await feedback.edit_text("No images found, falling back to video download.")
+                # We can't use the direct link here as it's not the final video URL.
+                # Fall back to the main downloader which uses yt_dlp
+                await download_content_from_url(update, context, url, 'TikTok')
+                return
+            else:
+                await feedback.edit_text("TikTok post might be private, restricted, or an unsupported format.")
+                return
+
         # --- Image Post Found ---
-        await feedback.edit_text(f"Found {len(images)} images. Sending as an album...")
+        await feedback.edit_text(f"Found {len(image_links)} images. Sending as an album...")
         
         media = []
-        caption_text = item.get('caption', item.get('title', ''))
+        caption_text = f"TikTok Photo Dump from {url.split('@')[1].split('/')[0]}" 
         
-        for img in images[:10]:
-            if img.get('url'):
-                media.append(
-                    {
-                        "type": "photo", 
-                        # Use the high quality URL
-                        "media": img['url'], 
-                        "caption": caption_text if not media else None, # Only caption the first photo
-                    }
-                )
+        for img_url in image_links[:10]:
+            media.append(
+                {
+                    "type": "photo", 
+                    "media": img_url, 
+                    "caption": caption_text if not media else None,
+                }
+            )
 
         if media:
             await context.bot.send_media_group(
@@ -990,12 +1006,13 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
             )
             await feedback.delete()
         else:
-            await feedback.edit_text("Couldn't retrieve image URLs from the API.")
+            await feedback.edit_text("Couldn't retrieve image URLs from the new API.")
             
     except Exception as e:
-        logger.error(f"TikTok Image Download failed: {e}")
+        logger.error(f"TikTok Image Download failed (New API): {e}")
         await feedback.edit_text("An unexpected error occurred during TikTok image download. Falling back to video.")
-        await download_content_from_url(update, context, url, 'TikTok') # Fallback
+        # Fallback to general downloader for video
+        await download_content_from_url(update, context, url, 'TikTok') 
 # --- END NEW TIKTOK IMAGE FUNCTION ---
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
