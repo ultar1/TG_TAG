@@ -878,13 +878,14 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
     os.makedirs(temp_dir)
     await query.edit_message_text("Checking video details...")
     try:
-        # --- 4K/HD FIX APPLIED HERE ---
+        # --- 4K/HD FIX APPLIED HERE: Prioritize 4K/HD formats explicitly ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4' # Key change for combining best video/audio streams
+            # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
+            'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4' 
         }
         # --- END FIX ---
         
@@ -933,32 +934,34 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['platform'] = platform
     await query.edit_message_text(f"Send me the {platform} URL.")
 
-# --- NEW FUNCTION FOR TIKTOK IMAGE FIX ---
+# --- TIKTOK IMAGE FIX: New Function using a different API ---
 async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """
     Downloads images from a TikTok 'photo dump' post using a dedicated API.
     """
     feedback = await update.message.reply_text("Attempting to download TikTok images...")
     
-    # Using a common, reliable TikTok downloader API that supports photo posts
-    api_url = 'https://api.tiklydown.eu.org/api/download'
+    # Using a new, more reliable TikTok downloader API (tikdown.one is often reliable)
+    # Note: TikTok APIs can change frequently, so this might need updating again if it fails.
+    api_url = 'https://downloader.api.tikdown.one/api/v2/dl'
     
     try:
-        response = requests.post(api_url, json={'url': url}, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        # Step 1: Get the video/photo details
+        get_response = requests.get(api_url, params={'url': url}, timeout=20)
+        get_response.raise_for_status()
+        data = get_response.json()
         
-        if data.get('code') != 0:
-            error_msg = data.get('msg', 'API download failed.')
-            await feedback.edit_text(f"TikTok image download failed: {error_msg}. Falling back to video download.")
+        if data.get('error'):
+            error_msg = data.get('message', 'API download failed.')
+            await feedback.edit_text(f"TikTok API failed: {error_msg}. Falling back to video download.")
             await download_content_from_url(update, context, url, 'TikTok') # Fallback
             return
 
-        item = data.get('data', {}).get('item_info', {})
+        item = data.get('data', {})
         images = item.get('images', [])
 
         if not images:
-            # No images found, fall back to video download
+            # No images found, fall back to video download (might be a standard video)
             await feedback.edit_text("No images found, falling back to video download.")
             await download_content_from_url(update, context, url, 'TikTok')
             return
@@ -967,13 +970,16 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         await feedback.edit_text(f"Found {len(images)} images. Sending as an album...")
         
         media = []
+        caption_text = item.get('caption', item.get('title', ''))
+        
         for img in images[:10]:
             if img.get('url'):
                 media.append(
                     {
                         "type": "photo", 
+                        # Use the high quality URL
                         "media": img['url'], 
-                        "caption": item.get('desc', '') if not media else None,
+                        "caption": caption_text if not media else None, # Only caption the first photo
                     }
                 )
 
@@ -990,20 +996,21 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         logger.error(f"TikTok Image Download failed: {e}")
         await feedback.edit_text("An unexpected error occurred during TikTok image download. Falling back to video.")
         await download_content_from_url(update, context, url, 'TikTok') # Fallback
-# --- END NEW FUNCTION ---
+# --- END NEW TIKTOK IMAGE FUNCTION ---
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     try:
-        # --- 4K/HD FIX APPLIED HERE ---
+        # --- 4K/HD FIX APPLIED HERE: Prioritize 4K/HD formats explicitly ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4' # Key change for combining best video/audio streams
+            # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
+            'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4' 
         }
         # --- END FIX ---
         
