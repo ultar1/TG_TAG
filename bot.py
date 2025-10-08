@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+l# -*- coding: utf-8 -*-
 
 # --- Imports ---
 import logging
@@ -773,7 +773,7 @@ async def handle_tiktok_count_selection(update: Update, context: ContextTypes.DE
         logger.error(f"TikTok search failed: {e}")
         await cb_query.edit_message_text("An unexpected error occurred while searching TikTok.")
         
-# --- END NEW TikTok Functions ---
+# --- END NEW TikTok Search Functions ---
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None) -> None:
     if not query:
@@ -878,9 +878,19 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
     os.makedirs(temp_dir)
     await query.edit_message_text("Checking video details...")
     try:
-        ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'quiet': True}
+        # --- 4K/HD FIX APPLIED HERE ---
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4' # Key change for combining best video/audio streams
+        }
+        # --- END FIX ---
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_id, download=False)
+        
         filesize_mb = (info.get('filesize') or info.get('filesize_approx', 0)) / (1024 * 1024)
         if filesize_mb <= 49:
             await query.edit_message_text(f"Downloading video ({filesize_mb:.2f} MB)...")
@@ -923,19 +933,83 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['platform'] = platform
     await query.edit_message_text(f"Send me the {platform} URL.")
 
+# --- NEW FUNCTION FOR TIKTOK IMAGE FIX ---
+async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    """
+    Downloads images from a TikTok 'photo dump' post using a dedicated API.
+    """
+    feedback = await update.message.reply_text("Attempting to download TikTok images...")
+    
+    # Using a common, reliable TikTok downloader API that supports photo posts
+    api_url = 'https://api.tiklydown.eu.org/api/download'
+    
+    try:
+        response = requests.post(api_url, json={'url': url}, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('code') != 0:
+            error_msg = data.get('msg', 'API download failed.')
+            await feedback.edit_text(f"TikTok image download failed: {error_msg}. Falling back to video download.")
+            await download_content_from_url(update, context, url, 'TikTok') # Fallback
+            return
+
+        item = data.get('data', {}).get('item_info', {})
+        images = item.get('images', [])
+
+        if not images:
+            # No images found, fall back to video download
+            await feedback.edit_text("No images found, falling back to video download.")
+            await download_content_from_url(update, context, url, 'TikTok')
+            return
+        
+        # --- Image Post Found ---
+        await feedback.edit_text(f"Found {len(images)} images. Sending as an album...")
+        
+        media = []
+        for img in images[:10]:
+            if img.get('url'):
+                media.append(
+                    {
+                        "type": "photo", 
+                        "media": img['url'], 
+                        "caption": item.get('desc', '') if not media else None,
+                    }
+                )
+
+        if media:
+            await context.bot.send_media_group(
+                chat_id=update.effective_chat.id, 
+                media=media
+            )
+            await feedback.delete()
+        else:
+            await feedback.edit_text("Couldn't retrieve image URLs from the API.")
+            
+    except Exception as e:
+        logger.error(f"TikTok Image Download failed: {e}")
+        await feedback.edit_text("An unexpected error occurred during TikTok image download. Falling back to video.")
+        await download_content_from_url(update, context, url, 'TikTok') # Fallback
+# --- END NEW FUNCTION ---
+
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     try:
+        # --- 4K/HD FIX APPLIED HERE ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4' # Key change for combining best video/audio streams
         }
+        # --- END FIX ---
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+            
         file_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
         await feedback.edit_text("Uploading to Telegram...")
         with open(file_path, 'rb') as f:
@@ -1141,14 +1215,21 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             'awaiting_crypto_symbols': lambda: get_crypto_prices(update, context, crypto_ids=text),
             'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
             'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
-            'awaiting_download_url': lambda: download_content_from_url(update, context, url=text, platform=context.user_data.pop('platform', 'unknown')),
+            
+            # --- TIKTOK IMAGE FIX APPLIED HERE ---
+            'awaiting_download_url': (
+                lambda: download_tiktok_image_post(update, context, url=text)
+                if context.user_data.pop('platform', 'unknown') == 'TikTok'
+                else download_content_from_url(update, context, url=text, platform=context.user_data.pop('platform', 'unknown'))
+            ),
+            # --- END FIX ---
+
             'awaiting_screenshot_url': lambda: screenshot_command(update, context, url=text),
             'awaiting_movie_title': lambda: movie_command(update, context, title=text),
             'awaiting_tts_text': lambda: tts_command(update, context, text_to_speak=text),
             'awaiting_ytsearch_query': lambda: youtube_command(update, context, query=text),
             'awaiting_suggestion': lambda: handle_suggestion(update, context, suggestion=text),
             'awaiting_db_table_name': lambda: view_db_table(update, context, table_name=text),
-            # NEW: This line fixes the TikTok search loop by wiring the user's text input to the next step.
             'awaiting_tiktok_query': lambda: ask_for_tiktok_count(update, context, query=text),
         }
         if popped_state in state_handlers:
