@@ -190,6 +190,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**/play <song name>**: Search and download a song or video.\n"
         "**/tts <text>**: Convert text to speech.\n"
         "**/mp4**: Reply to a video to convert it to an MP3 audio file.\n"
+        "**/4k**: Reply to a video to upscale its quality to 4K resolution (Warning: heavy process).\n"
         "**/gmail**: Send an email (Admin only).\n"
         "**/connect +<number>**: Connect to a WhatsApp account using a pairing code."
     )
@@ -639,6 +640,73 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Animate command error: {e}")
         await feedback.edit_text("Sorry, an error occurred while creating the animation.")
+    
+# --- NEW 4K VIDEO UPSCALING COMMAND ---
+async def four_k_upscale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message.reply_to_message or not update.message.reply_to_message.video:
+        await update.message.reply_text("Please reply to a video with the `/4k` command to upscale it.")
+        return
+    
+    feedback = await update.message.reply_text("📥 Downloading video...")
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+    os.makedirs(temp_dir)
+    
+    try:
+        video_file = await update.message.reply_to_message.video.get_file()
+        input_path = os.path.join(temp_dir, "input.mp4")
+        await video_file.download_to_drive(input_path)
+        
+        output_path = os.path.join(temp_dir, "upscaled_4k.mp4")
+        
+        await feedback.edit_text("✨ Starting 4K Upscale and Quality Enhancement... This is a CPU-intensive process and may take several minutes for longer videos.")
+
+        # FFmpeg command to resize to 4K (3840x2160) and increase bitrate for quality
+        # -vf scale=3840:2160: Lanczos interpolation for best resize quality
+        # -b:v 25000k: Set video bitrate to 25 Mbps (high quality 4K estimate)
+        ffmpeg_cmd = [
+            'ffmpeg', '-i', input_path,
+            '-vf', 'scale=3840:2160:flags=lanczos',
+            '-c:v', 'libx264',
+            '-crf', '23', # Constant Rate Factor (23 is default quality, but forces the 25M bitrate to be max)
+            '-b:v', '25000k', 
+            '-maxrate', '30000k',
+            '-bufsize', '60000k',
+            '-c:a', 'copy',
+            '-preset', 'medium', # Balance speed and compression
+            output_path
+        ]
+        
+        process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            error_output = stderr.decode()
+            logger.error(f"FFmpeg 4K upscale failed: {error_output}")
+            await feedback.edit_text(f"Sorry, 4K upscale failed. The source video may be too corrupted. FFmpeg Error: {error_output[:200]}...")
+            return
+
+        await feedback.edit_text("⬆️ 4K Upscale complete. Uploading video...")
+        
+        # Check if the output file size is too large for Telegram (50MB limit)
+        if os.path.getsize(output_path) > 49 * 1024 * 1024:
+            await feedback.edit_text("The final 4K video is too large (over 50 MB) for Telegram. Please try a shorter video.")
+            return
+
+        with open(output_path, 'rb') as f:
+            await context.bot.send_video(
+                chat_id=update.effective_chat.id, 
+                video=f, 
+                caption="✅ Video upscaled to 4K HD resolution!", 
+                supports_streaming=True
+            )
+        await feedback.delete()
+        
+    except Exception as e:
+        logger.error(f"Error in /4k command: {e}")
+        await feedback.edit_text("An unexpected error occurred during the 4K upscale process.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+# --- END NEW 4K VIDEO UPSCALING COMMAND ---
 
 async def convert_video_to_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message.reply_to_message or not update.message.reply_to_message.video:
@@ -1301,6 +1369,7 @@ def main() -> None:
         CommandHandler("upscale", upscale_image_command), CommandHandler("animate", animate_command),
         CommandHandler("summarize_file", summarize_file_command), CommandHandler("readtext", read_text_from_image_command),
         CommandHandler("play", play_command), CommandHandler("mp4", convert_video_to_audio),
+        CommandHandler("4k", four_k_upscale_command), # NEW 4K VIDEO COMMAND
         CommandHandler("novel", novel_command), CommandHandler("riddle", get_riddle), 
         CommandHandler("gmail", gmail_command), CommandHandler("screenshot", screenshot_command),
         CommandHandler("movie", movie_command), CommandHandler("tts", tts_command),
