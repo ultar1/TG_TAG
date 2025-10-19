@@ -658,23 +658,29 @@ async def four_k_upscale_command(update: Update, context: ContextTypes.DEFAULT_T
         
         output_path = os.path.join(temp_dir, "upscaled_4k.mp4")
         
-        await feedback.edit_text("✨ Starting 4K Upscale and Quality Enhancement... This is a CPU-intensive process and may take several minutes for longer videos.")
+        # Check size before starting the expensive process
+        if os.path.getsize(input_path) > 10 * 1024 * 1024:
+             await feedback.edit_text("⚠️ The video is quite large. Upscaling may be very slow or fail due to processing limits. Proceeding with caution...")
+        
+        await feedback.edit_text("✨ Starting 4K Upscale and Quality Enhancement...")
 
-        # FFmpeg command to resize to 4K (3840x2160) and increase bitrate for quality
-        # -vf scale=3840:2160: Lanczos interpolation for best resize quality
-        # -b:v 25000k: Set video bitrate to 25 Mbps (high quality 4K estimate)
+        # --- EFFICIENT FFmpeg COMMAND APPLIED ---
+        # Scale to 4K (3840x2160)
+        # -b:v 5000k: Reduced bitrate to 5 Mbps (more stable for low-cost hosting)
+        # -preset veryfast: Prioritize speed over file size optimization
         ffmpeg_cmd = [
             'ffmpeg', '-i', input_path,
             '-vf', 'scale=3840:2160:flags=lanczos',
             '-c:v', 'libx264',
-            '-crf', '23', # Constant Rate Factor (23 is default quality, but forces the 25M bitrate to be max)
-            '-b:v', '25000k', 
-            '-maxrate', '30000k',
-            '-bufsize', '60000k',
+            '-crf', '28', # A higher CRF value gives smaller file size at the expense of quality.
+            '-b:v', '5000k', # Target max video bitrate of 5 Mbps
+            '-maxrate', '5500k',
+            '-bufsize', '10000k',
             '-c:a', 'copy',
-            '-preset', 'medium', # Balance speed and compression
+            '-preset', 'veryfast', # Significant speed boost
             output_path
         ]
+        # --- END EFFICIENT FFmpeg COMMAND ---
         
         process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = await process.communicate()
@@ -682,14 +688,14 @@ async def four_k_upscale_command(update: Update, context: ContextTypes.DEFAULT_T
         if process.returncode != 0:
             error_output = stderr.decode()
             logger.error(f"FFmpeg 4K upscale failed: {error_output}")
-            await feedback.edit_text(f"Sorry, 4K upscale failed. The source video may be too corrupted. FFmpeg Error: {error_output[:200]}...")
+            await feedback.edit_text(f"❌ 4K upscale failed! The process was terminated. Please try a much shorter video (under 10 seconds). FFmpeg Error: {error_output[:200]}...")
             return
 
         await feedback.edit_text("⬆️ 4K Upscale complete. Uploading video...")
         
-        # Check if the output file size is too large for Telegram (50MB limit)
+        # Final file size check against Telegram's 50MB limit
         if os.path.getsize(output_path) > 49 * 1024 * 1024:
-            await feedback.edit_text("The final 4K video is too large (over 50 MB) for Telegram. Please try a shorter video.")
+            await feedback.edit_text("The final 4K video is too large (over 50 MB) for Telegram. Please try a shorter source video.")
             return
 
         with open(output_path, 'rb') as f:
