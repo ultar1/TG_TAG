@@ -91,6 +91,9 @@ except Exception as e: openai_client = None; logger.error(f"Failed to configure 
 # --- Constants & Database Setup ---
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# NEW: Define YouTube cookies file
+YTDL_COOKIES_FILE = "cookies_youtube.txt" 
+
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 Base = declarative_base()
@@ -792,17 +795,25 @@ async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
             return
     feedback = await update.message.reply_text(f"Searching YouTube for '{query}'...")
     try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch5'}
+        # --- YOUTUBE SEARCH FIX APPLIED HERE: Using cookies is the best solution ---
+        ydl_opts = {
+            'noplaylist': True, 
+            'quiet': True, 
+            'default_search': 'ytsearch5',
+            'ignoreerrors': True, # Keep to ignore soft errors
+            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass login
+        }
+        # --- END FIX ---
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(query, download=False)
-        if not info.get('entries'):
-            await feedback.edit_text("Sorry, couldn't find any results.")
+        if not info or not info.get('entries'):
+            await feedback.edit_text("Sorry, couldn't find any results or YouTube blocked the search request. If this continues, check your `cookies_youtube.txt` file.")
             return
         keyboard = [
             [InlineKeyboardButton(
                 (v['title'][:60] + '..') if len(v['title']) > 60 else v['title'],
                 callback_data=f"play_confirm:{v['id']}"
-            )] for v in info['entries']
+            )] for v in info['entries'] if v and v.get('id')
         ]
         await feedback.edit_text("Top 5 results:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
@@ -820,11 +831,19 @@ async def search_and_play_song(update: Update, context: ContextTypes.DEFAULT_TYP
     msg_obj = update.callback_query.message if update.callback_query else update.message
     feedback = await msg_obj.reply_text(f"Searching for '{song_name}'...")
     try:
-        ydl_opts = {'noplaylist': True, 'quiet': True, 'default_search': 'ytsearch1'}
+        # --- PLAY SEARCH FIX APPLIED HERE: Using cookies is the best solution ---
+        ydl_opts = {
+            'noplaylist': True, 
+            'quiet': True, 
+            'default_search': 'ytsearch1',
+            'ignoreerrors': True,
+            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass login
+        }
+        # --- END FIX ---
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(song_name, download=False)
-        if not info.get('entries'):
-            await feedback.edit_text("Sorry, couldn't find any results.")
+        if not info or not info.get('entries'):
+            await feedback.edit_text("Sorry, couldn't find any results or YouTube blocked the search request. If this continues, check your `cookies_youtube.txt` file.")
             return
         video = info['entries'][0]
         keyboard = [
@@ -854,13 +873,17 @@ async def handle_audio_download(update: Update, context: ContextTypes.DEFAULT_TY
     os.makedirs(temp_dir)
     await query.edit_message_text("Downloading audio...")
     try:
+        # --- YOUTUBE AUDIO FIX APPLIED HERE: Using cookies is the best solution ---
         audio_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}],
             'noplaylist': True,
             'quiet': True,
+            'ignoreerrors': True,
+            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass login
         }
+        # --- END FIX ---
         with yt_dlp.YoutubeDL(audio_opts) as ydl:
             info = ydl.extract_info(video_id, download=True)
         audio_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
@@ -887,11 +910,13 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
     os.makedirs(temp_dir)
     await query.edit_message_text("Checking video details...")
     try:
-        # --- 4K/HD FIX APPLIED HERE: Prioritize 4K/HD formats explicitly ---
+        # --- 4K/HD AND YOUTUBE DOWNLOAD FIX APPLIED HERE ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
+            'ignoreerrors': True,
+            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass login
             # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
             'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4' 
@@ -1020,11 +1045,13 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     try:
-        # --- 4K/HD FIX APPLIED HERE: Prioritize 4K/HD formats explicitly ---
+        # --- 4K/HD AND YOUTUBE DOWNLOAD FIX APPLIED HERE ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
+            'ignoreerrors': True,
+            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass YouTube login
             # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
             'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4' 
