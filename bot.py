@@ -1054,14 +1054,19 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
     api_url = 'https://ssstik.io/api/dl'
     
     try:
-        # ssstik.io requires a POST request with the URL in the form data
+        # --- AGGRESSIVE HEADERS APPLIED ---
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Referer': 'https://ssstik.io/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
         }
+        # --- END AGGRESSIVE HEADERS ---
         
         response = requests.post(api_url, data={'url': url, 'type': 'photo'}, headers=headers, timeout=20)
-        response.raise_for_status()
+        # Raise an exception for HTTP errors (403, 404, etc.)
+        response.raise_for_status() 
         
         # Parse HTML to find download links (ssstik often returns HTML chunks)
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -1070,18 +1075,18 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         image_links = [img['src'] for img in soup.find_all('img', {'loading': 'lazy'}) if 'c.y-cdn.net/dl/image' in img.get('src', '')]
         
         if not image_links:
-            # Check for video download links as a fallback for standard videos
-            video_link = soup.find('a', {'href': lambda href: href and 'tiktokcdn' in href and 'nowatermark' in href})
+            # Check for video download links as a fallback for standard videos (yt-dlp is not used here)
+            # Find the failure reason to provide better feedback
+            error_message = soup.find('div', class_='error-message')
             
-            if video_link:
-                await feedback.edit_text("No images found, falling back to video download.")
-                # We can't use the direct link here as it's not the final video URL.
-                # Fall back to the main downloader which uses yt_dlp
-                await download_content_from_url(update, context, url, 'TikTok')
+            if error_message:
+                await feedback.edit_text(f"❌ TikTok API Error: {error_message.text.strip()}")
                 return
-            else:
-                await feedback.edit_text("TikTok post might be private, restricted, or an unsupported format.")
-                return
+
+            # If no images and no clear error, assume video and fallback
+            await feedback.edit_text("No images found, attempting standard download...")
+            await download_content_from_url(update, context, url, 'TikTok')
+            return
 
         # --- Image Post Found ---
         await feedback.edit_text(f"Found {len(image_links)} images. Sending as an album...")
@@ -1107,8 +1112,11 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         else:
             await feedback.edit_text("Couldn't retrieve image URLs from the new API.")
             
+    except requests.exceptions.HTTPError as http_e:
+        logger.error(f"TikTok Image Download failed (HTTP Error): {http_e}")
+        await feedback.edit_text(f"❌ TikTok Image Download failed: The API blocked the request (Error: {http_e.response.status_code} {http_e.response.reason}). Please try a different link or wait.")
     except Exception as e:
-        logger.error(f"TikTok Image Download failed (New API): {e}")
+        logger.error(f"TikTok Image Download failed (General): {e}")
         await feedback.edit_text("An unexpected error occurred during TikTok image download. Falling back to video.")
         # Fallback to general downloader for video
         await download_content_from_url(update, context, url, 'TikTok') 
