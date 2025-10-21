@@ -1042,100 +1042,33 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['platform'] = platform
     await query.edit_message_text(f"Send me the {platform} URL.")
 
-# --- TIKTOK IMAGE FIX: New Function using an alternative public API ---
-async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    """
-    Downloads images from a TikTok 'photo dump' post using a dedicated API.
-    """
-    feedback = await update.message.reply_text("Attempting to download TikTok images...")
-    
-    # Using the ssstik.io API for better reliability with different media types
-    # Note: TikTok APIs are fragile and this might need future updates.
-    api_url = 'https://ssstik.io/api/dl'
-    
-    try:
-        # --- AGGRESSIVE HEADERS APPLIED ---
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Referer': 'https://ssstik.io/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-        }
-        # --- END AGGRESSIVE HEADERS ---
-        
-        response = requests.post(api_url, data={'url': url, 'type': 'photo'}, headers=headers, timeout=20)
-        # Raise an exception for HTTP errors (403, 404, etc.)
-        response.raise_for_status() 
-        
-        # Parse HTML to find download links (ssstik often returns HTML chunks)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Look for image download elements
-        image_links = [img['src'] for img in soup.find_all('img', {'loading': 'lazy'}) if 'c.y-cdn.net/dl/image' in img.get('src', '')]
-        
-        if not image_links:
-            # Check for video download links as a fallback for standard videos (yt-dlp is not used here)
-            # Find the failure reason to provide better feedback
-            error_message = soup.find('div', class_='error-message')
-            
-            if error_message:
-                await feedback.edit_text(f"❌ TikTok API Error: {error_message.text.strip()}")
-                return
-
-            # If no images and no clear error, assume video and fallback
-            await feedback.edit_text("No images found, attempting standard download...")
-            await download_content_from_url(update, context, url, 'TikTok')
-            return
-
-        # --- Image Post Found ---
-        await feedback.edit_text(f"Found {len(image_links)} images. Sending as an album...")
-        
-        media = []
-        caption_text = f"TikTok Photo Dump from {url.split('@')[1].split('/')[0]}" 
-        
-        for img_url in image_links[:10]:
-            media.append(
-                {
-                    "type": "photo", 
-                    "media": img_url, 
-                    "caption": caption_text if not media else None,
-                }
-            )
-
-        if media:
-            await context.bot.send_media_group(
-                chat_id=update.effective_chat.id, 
-                media=media
-            )
-            await feedback.delete()
-        else:
-            await feedback.edit_text("Couldn't retrieve image URLs from the new API.")
-            
-    except requests.exceptions.HTTPError as http_e:
-        logger.error(f"TikTok Image Download failed (HTTP Error): {http_e}")
-        await feedback.edit_text(f"❌ TikTok Image Download failed: The API blocked the request (Error: {http_e.response.status_code} {http_e.response.reason}). Please try a different link or wait.")
-    except Exception as e:
-        logger.error(f"TikTok Image Download failed (General): {e}")
-        await feedback.edit_text("An unexpected error occurred during TikTok image download. Falling back to video.")
-        # Fallback to general downloader for video
-        await download_content_from_url(update, context, url, 'TikTok') 
-# --- END NEW TIKTOK IMAGE FUNCTION ---
-
+# --- CONSOLIDATED download_content_from_url FUNCTION (USING USER'S LOGIC) ---
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str, platform: str) -> None:
     if platform.lower() == 'tiktok':
         feedback = await update.message.reply_text("Analyzing TikTok link...")
         try:
+            # Note: Tikwm.com is unstable, but using it as requested
             api_url = f"https://tikwm.com/api/?url={content_url}"
             response = requests.get(api_url, timeout=15).json()
             if response.get('code') == 0 and 'data' in response:
                 data = response['data']
                 if 'images' in data and data['images']:
                     await feedback.edit_text(f"Found {len(data['images'])} photos. Sending them now...")
-                    for image_url in data['images']:
-                        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
-                    await feedback.delete()
-                    return
+                    
+                    media = []
+                    caption = data.get('title', 'TikTok Photos')
+                    for image_url in data['images'][:10]: # Limit to 10 for media group
+                        media.append({
+                            "type": "photo", 
+                            "media": image_url,
+                            "caption": caption if not media else None
+                        })
+
+                    if media:
+                        await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+                        await feedback.delete()
+                        return
+                    
                 else:
                     await feedback.edit_text("It's a video. Using the standard downloader...")
             else:
@@ -1143,27 +1076,61 @@ async def download_content_from_url(update: Update, context: ContextTypes.DEFAUL
         except Exception as e:
             logger.error(f"TikTok API error for {content_url}: {e}")
             await feedback.edit_text("Could not fetch details. Trying standard downloader...")
-
+            
+    # --- START STANDARD DOWNLOAD (yt-dlp) ---
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir, exist_ok=True)
     try:
-        ydl_opts = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
-        if platform.lower() == 'youtube' and os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
-        elif os.path.exists('cookies.txt'): ydl_opts['cookiefile'] = 'cookies.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([content_url])
+        # High quality and robust settings preserved here
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 
+            'noplaylist': True, 
+            'quiet': True, 
+            'ignoreerrors': True,
+            # Best quality video format selection (4K/HD)
+            'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
+            'merge_output_format': 'mp4',
+            'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'} 
+        }
+
+        # Cookie handling for YouTube (and general domains if 'cookies.txt' exists)
+        if platform.lower() == 'youtube' and os.path.exists(YTDL_COOKIES_FILE): 
+            ydl_opts['cookiefile'] = YTDL_COOKIES_FILE
+        elif os.path.exists('cookies.txt'): 
+            ydl_opts['cookiefile'] = 'cookies.txt'
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: 
+            ydl.download([content_url])
+            
         downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files: raise Exception("Download failed silently")
+        
+        # This checks if a file was actually downloaded by yt-dlp, which fixes the silent failure logging.
+        if not downloaded_files:
+            logger.error(f"yt-dlp failed to download content from {content_url}. It might be restricted or unsupported.")
+            await feedback.edit_text("Download failed. The link may be private, restricted, or an unsupported format.")
+            return
+
         downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
+        
+        # Check Telegram's file limit
+        if os.path.getsize(downloaded_file_path) > 49 * 1024 * 1024:
+            await feedback.edit_text("File is too large (over 50 MB) to send to Telegram.")
+            return
+
         await feedback.edit_text("Uploading to Telegram...")
         with open(downloaded_file_path, 'rb') as f:
             await context.bot.send_video(chat_id=update.effective_chat.id, video=f, supports_streaming=True)
         await feedback.delete()
+        
     except Exception as e:
+        # Logging the specific error from yt-dlp is difficult, but we catch generic errors.
         logger.error(f"Download error for {content_url}: {e}")
         await feedback.edit_text("Download failed. The link may be private or invalid.")
     finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-            
+        if os.path.exists(temp_dir): 
+            shutil.rmtree(temp_dir)
+# --- END CONSOLIDATED FUNCTION ---
+
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
@@ -1359,13 +1326,9 @@ async def record_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             'awaiting_summary_url': lambda: summarize_url(update, context, url=text),
             'awaiting_translation_text': lambda: translate_command(update, context, text_to_translate=text),
             
-            # --- TIKTOK IMAGE FIX APPLIED HERE ---
-            'awaiting_download_url': (
-                lambda: download_tiktok_image_post(update, context, url=text)
-                if context.user_data.pop('platform', 'unknown') == 'TikTok'
-                else download_content_from_url(update, context, url=text, platform=context.user_data.pop('platform', 'unknown'))
-            ),
-            # --- END FIX ---
+            # --- DOWNLOAD URL HANDLER (using consolidated function) ---
+            'awaiting_download_url': lambda: download_content_from_url(update, context, content_url=text, platform=context.user_data.pop('platform', 'unknown')),
+            # --- END DOWNLOAD URL HANDLER ---
 
             'awaiting_screenshot_url': lambda: screenshot_command(update, context, url=text),
             'awaiting_movie_title': lambda: movie_command(update, context, title=text),
