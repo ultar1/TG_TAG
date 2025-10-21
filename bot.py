@@ -1122,38 +1122,48 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         await download_content_from_url(update, context, url, 'TikTok') 
 # --- END NEW TIKTOK IMAGE FUNCTION ---
 
-async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
+async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, content_url: str, platform: str) -> None:
+    if platform.lower() == 'tiktok':
+        feedback = await update.message.reply_text("Analyzing TikTok link...")
+        try:
+            api_url = f"https://tikwm.com/api/?url={content_url}"
+            response = requests.get(api_url, timeout=15).json()
+            if response.get('code') == 0 and 'data' in response:
+                data = response['data']
+                if 'images' in data and data['images']:
+                    await feedback.edit_text(f"Found {len(data['images'])} photos. Sending them now...")
+                    for image_url in data['images']:
+                        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                    await feedback.delete()
+                    return
+                else:
+                    await feedback.edit_text("It's a video. Using the standard downloader...")
+            else:
+                 await feedback.edit_text("Could not fetch details. Trying standard downloader...")
+        except Exception as e:
+            logger.error(f"TikTok API error for {content_url}: {e}")
+            await feedback.edit_text("Could not fetch details. Trying standard downloader...")
+
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir)
+    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4())); os.makedirs(temp_dir, exist_ok=True)
     try:
-        # --- 4K/HD AND YOUTUBE DOWNLOAD FIX APPLIED HERE ---
-        ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'noplaylist': True,
-            'quiet': True,
-            'ignoreerrors': True,
-            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass YouTube login
-            # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
-            'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4' 
-        }
-        # --- END FIX ---
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-        file_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
+        ydl_opts = {'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'), 'noplaylist': True, 'quiet': True, 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'http_headers': {'User-Agent': 'Mozilla/5.0'}}
+        if platform.lower() == 'youtube' and os.path.exists('cookies_youtube.txt'): ydl_opts['cookiefile'] = 'cookies_youtube.txt'
+        elif os.path.exists('cookies.txt'): ydl_opts['cookiefile'] = 'cookies.txt'
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([content_url])
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files: raise Exception("Download failed silently")
+        downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
         await feedback.edit_text("Uploading to Telegram...")
-        with open(file_path, 'rb') as f:
-            await context.bot.send_video(chat_id=update.effective_chat.id, video=f)
+        with open(downloaded_file_path, 'rb') as f:
+            await context.bot.send_video(chat_id=update.effective_chat.id, video=f, supports_streaming=True)
         await feedback.delete()
     except Exception as e:
-        logger.error(f"Download error for {url}: {e}")
+        logger.error(f"Download error for {content_url}: {e}")
         await feedback.edit_text("Download failed. The link may be private or invalid.")
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+            
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         response = requests.get("https://v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,racist,sexist&type=twopart", timeout=5).json()
