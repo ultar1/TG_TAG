@@ -1015,7 +1015,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         
         # --- 1. DIRECT SEND: If small enough ---
         if file_size_mb <= SAFE_SIZE_LIMIT_MB:
-            await query.edit_message_text(f"✅ Video ready ({file_size_mb:.2f} MB). Uploading...")
+            await query.edit_message_text(f"Video ready ({file_size_mb:.2f} MB). Uploading...")
             with open(video_path, 'rb') as f:
                 await context.bot.send_video(
                     chat_id=query.message.chat_id, 
@@ -1027,7 +1027,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             
         # --- 2. SPLITTING: If too large, attempt fast, copy-stream split ---
         
-        await query.edit_message_text(f"⚠️ Video is too large ({file_size_mb:.2f} MB). Attempting to split into chunks...")
+        await query.edit_message_text(f"Video is too large ({file_size_mb:.2f} MB). Attempting to split into chunks...")
         
         # Determine number of parts based on size (aiming for chunks under 48MB)
         num_parts = max(2, int(file_size_mb // SAFE_SIZE_LIMIT_MB) + 1)
@@ -1040,7 +1040,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         
         chunk_duration = total_duration / num_parts
         split_paths = []
-        ffmpeg_commands = []
+        ffmpeg_commands = [] # This list will hold the awaitable objects (process.wait() coroutines)
         
         for i in range(num_parts):
             start_time = i * chunk_duration
@@ -1055,14 +1055,17 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
                 '-c', 'copy', 
                 part_path
             ]
-            ffmpeg_commands.append(asyncio.create_subprocess_exec(*cmd).wait())
-
-        # Execute all splits concurrently
+            
+            # Create the process and immediately append the .wait() coroutine
+            process = await asyncio.create_subprocess_exec(*cmd)
+            ffmpeg_commands.append(process.wait())
+            
+        # Execute all splits concurrently and wait for them to complete
         await asyncio.gather(*ffmpeg_commands)
         
         # Send the split videos
         sent_count = 0
-        await query.edit_message_text(f"Sending {num_parts} split videos...")
+        await query.edit_message_text("Sending split videos...")
         for i, path in enumerate(split_paths):
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 with open(path, 'rb') as f_split:
@@ -1078,14 +1081,13 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
             await query.delete_message()
             return # Success, exit function
 
-        # --- 3. COMPRESSION FALLBACK: If splitting fails (e.g., source file corruption) or if some parts are still too big ---
+        # --- 3. COMPRESSION FALLBACK: If splitting fails or is incomplete ---
         
-        await query.edit_message_text("❌ Splitting failed for some parts. Attempting to compress the original video as a fallback. This may take a while...")
+        await query.edit_message_text("Splitting failed or was incomplete. Attempting to compress the original video as a fallback. This may take a while...")
         
         compressed_path = os.path.join(temp_dir, "compressed.mp4")
         
         # FFmpeg command for robust compression
-        # -crf 30 is generally good for aggressive file size reduction while maintaining acceptable quality
         ffmpeg_compress = [
             'ffmpeg', '-i', video_path, 
             '-vcodec', 'libx264', '-crf', '30',  
@@ -1105,7 +1107,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         compressed_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
         
         if compressed_size_mb <= SAFE_SIZE_LIMIT_MB:
-            await query.edit_message_text(f"✅ Compression successful! ({compressed_size_mb:.2f} MB). Uploading...")
+            await query.edit_message_text(f"Compression successful! ({compressed_size_mb:.2f} MB). Uploading...")
             with open(compressed_path, 'rb') as f_comp:
                 await context.bot.send_video(
                     chat_id=query.message.chat_id, 
@@ -1115,7 +1117,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
                 )
             await query.delete_message()
         else:
-            await query.edit_message_text(f"❌ Video remains too large ({compressed_size_mb:.2f} MB) even after compression. Cannot send.")
+            await query.edit_message_text(f"Video remains too large ({compressed_size_mb:.2f} MB) even after compression. Cannot send.")
 
     except Exception as e:
         logger.error(f"Video download/processing error: {e}")
@@ -1123,6 +1125,7 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(error_message)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 
 
