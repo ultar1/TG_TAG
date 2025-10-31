@@ -983,41 +983,148 @@ async def handle_video_download(update: Update, context: ContextTypes.DEFAULT_TY
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     await query.edit_message_text("Checking video details...")
+    video_path = None
+    
+    # --- Constants for size management ---
+    SAFE_SIZE_LIMIT_MB = 48  # Safe size limit for local upload to Telegram (below the 50MB hard limit)
+    
     try:
-        # --- 4K/HD AND YOUTUBE DOWNLOAD FIX APPLIED HERE ---
+        # --- YTDL Options for High Quality Video Download ---
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'noplaylist': True,
             'quiet': True,
             'ignoreerrors': True,
-            'cookiefile': YTDL_COOKIES_FILE, # NEW: Pass cookies to bypass login
-            # Force the best quality by prioritizing 4K, then 2K, then best video/audio combination
-            'format': 'bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'cookiefile': YTDL_COOKIES_FILE,
+            'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4' 
         }
-        # --- END FIX ---
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_id, download=False)
+        await query.edit_message_text("Downloading video to server...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
+            ydl_dl.download([video_id])
+            
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files:
+            await query.edit_message_text("Download failed: No file found.")
+            return
+
+        video_path = os.path.join(temp_dir, downloaded_files[0])
+        file_size_bytes = os.path.getsize(video_path)
+        file_size_mb = file_size_bytes / (1024 * 1024)
         
-        filesize_mb = (info.get('filesize') or info.get('filesize_approx', 0)) / (1024 * 1024)
-        if filesize_mb <= 49:
-            await query.edit_message_text(f"Downloading video ({filesize_mb:.2f} MB)...")
-            ydl_opts['outtmpl'] = os.path.join(temp_dir, '%(title)s.%(ext)s')
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl_dl:
-                ydl_dl.download([video_id])
-            video_path = os.path.join(temp_dir, os.listdir(temp_dir)[0])
-            await query.edit_message_text("Sending video...")
+        # --- 1. DIRECT SEND: If small enough ---
+        if file_size_mb <= SAFE_SIZE_LIMIT_MB:
+            await query.edit_message_text(f"✅ Video ready ({file_size_mb:.2f} MB). Uploading...")
             with open(video_path, 'rb') as f:
-                await context.bot.send_video(chat_id=query.message.chat_id, video=f, supports_streaming=True)
+                await context.bot.send_video(
+                    chat_id=query.message.chat_id, 
+                    video=f, 
+                    supports_streaming=True
+                )
+            await query.delete_message()
+            return # Success, exit function
+            
+        # --- 2. SPLITTING: If too large, attempt fast, copy-stream split ---
+        
+        await query.edit_message_text(f"⚠️ Video is too large ({file_size_mb:.2f} MB). Attempting to split into chunks...")
+        
+        # Determine number of parts based on size (aiming for chunks under 48MB)
+        num_parts = max(2, int(file_size_mb // SAFE_SIZE_LIMIT_MB) + 1)
+        
+        # Get total duration
+        ffprobe_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
+        process = await asyncio.create_subprocess_exec(*ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, _ = await process.communicate()
+        total_duration = float(stdout.decode().strip())
+        
+        chunk_duration = total_duration / num_parts
+        split_paths = []
+        ffmpeg_commands = []
+        
+        for i in range(num_parts):
+            start_time = i * chunk_duration
+            part_path = os.path.join(temp_dir, f"video_part{i+1}.mp4")
+            split_paths.append(part_path)
+            
+            # Use -ss for seek and -t for duration. -c copy is fast and preserves quality.
+            cmd = [
+                'ffmpeg', '-i', video_path, 
+                '-ss', str(start_time), 
+                '-t', str(chunk_duration), 
+                '-c', 'copy', 
+                part_path
+            ]
+            ffmpeg_commands.append(asyncio.create_subprocess_exec(*cmd).wait())
+
+        # Execute all splits concurrently
+        await asyncio.gather(*ffmpeg_commands)
+        
+        # Send the split videos
+        sent_count = 0
+        await query.edit_message_text(f"Sending {num_parts} split videos...")
+        for i, path in enumerate(split_paths):
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                with open(path, 'rb') as f_split:
+                    await context.bot.send_video(
+                        chat_id=query.message.chat_id, 
+                        video=f_split, 
+                        caption=f"Video Part {i+1}/{num_parts}", 
+                        supports_streaming=True
+                    )
+                    sent_count += 1
+            
+        if sent_count == num_parts:
+            await query.delete_message()
+            return # Success, exit function
+
+        # --- 3. COMPRESSION FALLBACK: If splitting fails (e.g., source file corruption) or if some parts are still too big ---
+        
+        await query.edit_message_text("❌ Splitting failed for some parts. Attempting to compress the original video as a fallback. This may take a while...")
+        
+        compressed_path = os.path.join(temp_dir, "compressed.mp4")
+        
+        # FFmpeg command for robust compression
+        # -crf 30 is generally good for aggressive file size reduction while maintaining acceptable quality
+        ffmpeg_compress = [
+            'ffmpeg', '-i', video_path, 
+            '-vcodec', 'libx264', '-crf', '30',  
+            '-preset', 'fast', '-c:a', 'copy', 
+            compressed_path
+        ]
+        
+        process = await asyncio.create_subprocess_exec(*ffmpeg_compress, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg Compression failed: {stderr.decode()}")
+            await query.edit_message_text("Compression failed! The original video was too large and couldn't be processed.")
+            return
+
+        # Check size of compressed file
+        compressed_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
+        
+        if compressed_size_mb <= SAFE_SIZE_LIMIT_MB:
+            await query.edit_message_text(f"✅ Compression successful! ({compressed_size_mb:.2f} MB). Uploading...")
+            with open(compressed_path, 'rb') as f_comp:
+                await context.bot.send_video(
+                    chat_id=query.message.chat_id, 
+                    video=f_comp, 
+                    caption="Compressed Video (Original was too large)", 
+                    supports_streaming=True
+                )
             await query.delete_message()
         else:
-            await query.edit_message_text(f"Video is too large to send ({filesize_mb:.2f} MB).")
+            await query.edit_message_text(f"❌ Video remains too large ({compressed_size_mb:.2f} MB) even after compression. Cannot send.")
+
     except Exception as e:
-        logger.error(f"Video download error: {e}")
-        await query.edit_message_text("An error occurred during download.")
+        logger.error(f"Video download/processing error: {e}")
+        error_message = f"An unexpected error occurred during the video process: {e}"
+        await query.edit_message_text(error_message)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 
 async def handle_play_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
