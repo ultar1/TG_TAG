@@ -1275,7 +1275,7 @@ async def try_tikwm_api(url: str, feedback) -> dict:
             video_id = url.split('/video/')[1].split('?')[0].split('@')[0]
         elif 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
             try:
-                resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+                resp = requests.get(url, allow_redirects=True, timeout=10, headers=headers)
                 if '/video/' in resp.url:
                     video_id = resp.url.split('/video/')[1].split('?')[0].split('@')[0]
             except:
@@ -1689,24 +1689,33 @@ async def send_pinterest_result(update: Update, context: ContextTypes.DEFAULT_TY
             file_ext = os.path.splitext(file_path)[1].lower()
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             
-            if file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
-                await feedback.edit_text(f"[Uploading] Pinterest image ({file_size_mb:.2f} MB)...")
-                with open(file_path, 'rb') as f:
-                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=f, caption="[Pinterest] Image")
-            elif file_ext in ['.mp4', '.webm', '.mov', '.avi']:
-                if file_size_mb > 50:
-                    await feedback.edit_text(f"[Error] Video too large ({file_size_mb:.2f} MB). Telegram limit is 50 MB.")
-                    return
-                await feedback.edit_text(f"[Uploading] Pinterest video ({file_size_mb:.2f} MB)...")
-                with open(file_path, 'rb') as f:
-                    await context.bot.send_video(chat_id=update.effective_chat.id, video=f, caption="[Pinterest] Video")
-            else:
-                await feedback.edit_text(f"[Uploading] Pinterest file ({file_size_mb:.2f} MB)...")
-                with open(file_path, 'rb') as f:
-                    await context.bot.send_document(chat_id=update.effective_chat.id, document=f, filename=os.path.basename(file_path))
-            
-            await feedback.delete()
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            try:
+                if file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+                    await feedback.edit_text(f"[Uploading] Pinterest image ({file_size_mb:.2f} MB)...")
+                    with open(file_path, 'rb') as f:
+                        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=f, caption="[Pinterest] Image")
+                elif file_ext in ['.mp4', '.webm', '.mov', '.avi']:
+                    if file_size_mb > 50:
+                        await feedback.edit_text(f"[Error] Video too large ({file_size_mb:.2f} MB). Telegram limit is 50 MB.")
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return
+                    await feedback.edit_text(f"[Uploading] Pinterest video ({file_size_mb:.2f} MB)...")
+                    with open(file_path, 'rb') as f:
+                        await context.bot.send_video(chat_id=update.effective_chat.id, video=f, caption="[Pinterest] Video")
+                else:
+                    await feedback.edit_text(f"[Uploading] Pinterest file ({file_size_mb:.2f} MB)...")
+                    with open(file_path, 'rb') as f:
+                        await context.bot.send_document(chat_id=update.effective_chat.id, document=f, filename=os.path.basename(file_path))
+                
+                await feedback.delete()
+            except Exception as send_err:
+                logger.error(f"Error sending Pinterest file: {send_err}")
+                try:
+                    await feedback.edit_text(f"[Error] Failed to send: {str(send_err)[:50]}")
+                except:
+                    pass
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
         
         elif result['type'] == 'url':
             media_url = result['url']
@@ -1951,18 +1960,25 @@ async def display_pdf_results(feedback, results: list, source: str) -> None:
             try:
                 title = book.get('title', 'Unknown')
                 button_text = (title[:45] + '...') if len(title) > 45 else title
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book['url']}:{source}")])
+                # Store URL in context instead of callback data to avoid 64-byte limit
+                callback_id = f"pdf_{idx}"
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{callback_id}:{source}")])
             except:
                 continue
         
         if keyboard:
+            # Store results in context for retrieval in callback
+            feedback.bot.context = results if hasattr(feedback.bot, 'context') else None
             await feedback.edit_text(f"[Found] Results from {source}. Choose one to download:", 
                                     reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             await feedback.edit_text("[Error] Could not parse results.")
     except Exception as e:
         logger.error(f"Error displaying PDF results: {e}")
-        await feedback.edit_text("[Error] Failed to display results.")
+        try:
+            await feedback.edit_text("[Error] Failed to display results.")
+        except:
+            pass
 
 async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle PDF download with multiple fallback methods"""
@@ -1975,8 +1991,24 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("[Error] Invalid download request.")
         return
     
-    pdf_url = data_parts[1]
+    callback_id = data_parts[1]
     source = data_parts[2] if len(data_parts) > 2 else "unknown"
+    
+    # Retrieve PDF URL from user data or stored results
+    pdf_results = context.user_data.get('pdf_results', [])
+    pdf_url = None
+    
+    if pdf_results:
+        try:
+            idx = int(callback_id.replace('pdf_', ''))
+            if idx < len(pdf_results):
+                pdf_url = pdf_results[idx].get('url')
+        except:
+            pass
+    
+    if not pdf_url:
+        await query.edit_message_text("[Error] PDF URL not found. Please search again.")
+        return
     
     feedback = await query.edit_message_text("[Starting] Downloading PDF...")
     
@@ -2006,7 +2038,10 @@ async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TY
         await feedback.edit_text("[Error] All download methods failed. The PDF may be restricted or removed.")
     except Exception as e:
         logger.error(f"PDF download error: {e}")
-        await feedback.edit_text(f"[Error] Download failed: {str(e)[:80]}")
+        try:
+            await feedback.edit_text(f"[Error] Download failed: {str(e)[:80]}")
+        except:
+            pass
 
 async def try_pdf_download_direct(url: str, feedback) -> dict:
     """Attempt direct PDF download"""
@@ -2072,10 +2107,19 @@ async def send_pdf_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, r
             filename=result['filename'],
             caption="[PDF] Document"
         )
-        await feedback.delete()
+        try:
+            await feedback.delete()
+        except:
+            pass
     except Exception as e:
         logger.error(f"Error sending PDF: {e}")
-        await feedback.edit_text(f"[Error] Failed to send PDF: {str(e)[:50]}")
+        try:
+            await feedback.edit_text(f"[Error] Failed to send PDF: {str(e)[:50]}")
+        except:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"[Error] Failed to send PDF: {str(e)[:50]}"
+            )
 
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
