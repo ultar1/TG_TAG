@@ -1,0 +1,35 @@
+# requirements.txt
+
+# Core bot library with extras for rate limiting and webhooks
+python-telegram-bot[rate-limiter,job-queue,webhooks]
+
+# Web Server
+Flask
+gunicorn
+uvicorn
+
+# Database
+SQLAlchemy
+psycopg2-binary
+
+# Media Downloads & Processing
+yt-dlp
+pydub
+PrettyTable
+
+
+# AI & API Services
+google-generativeai
+openai
+gTTS
+requests
+beautifulsoup4
+google-cloud-texttospeech
+
+# File and Image Handling
+PyMuPDF
+Pillow
+pytesseract
+
+# Utilities
+python-dotenv
