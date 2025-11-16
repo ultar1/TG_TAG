@@ -1272,32 +1272,52 @@ async def try_tikwm_api(url: str, feedback) -> dict:
         
         video_id = None
         if '/video/' in url:
-            video_id = url.split('/video/')[1].split('?')[0]
+            video_id = url.split('/video/')[1].split('?')[0].split('@')[0]
         elif 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
-            resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
-            if '/video/' in resp.url:
-                video_id = resp.url.split('/video/')[1].split('?')[0]
+            try:
+                resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+                if '/video/' in resp.url:
+                    video_id = resp.url.split('/video/')[1].split('?')[0].split('@')[0]
+            except:
+                pass
         
-        if not video_id:
+        if not video_id or len(video_id) == 0:
+            logger.error(f"Could not extract video ID from {url}")
             return None
         
         api_url = 'https://tikwm.com/api/feed/video'
         response = requests.get(api_url, headers=headers, params={'video_id': video_id}, timeout=15)
+        response.raise_for_status()
         data = response.json()
         
-        if not data or 'data' not in data:
+        if not data:
+            logger.error("Empty response from tikwm API")
             return None
         
         media_data = data.get('data', {})
-        slides = media_data.get('slides', [])
+        if not media_data:
+            logger.error("No data field in tikwm response")
+            return None
         
-        if slides and len(slides) > 0:
+        # Check for slideshow/carousel with images
+        slides = media_data.get('slides', [])
+        images = media_data.get('images', [])
+        
+        if slides and isinstance(slides, list) and len(slides) > 0:
+            logger.info(f"Found {len(slides)} slides in tikwm response")
             return {'type': 'slideshow', 'slides': slides[:10]}
         
-        video_url = media_data.get('play') or media_data.get('download_addr')
-        if video_url:
+        if images and isinstance(images, list) and len(images) > 0:
+            logger.info(f"Found {len(images)} images in tikwm response")
+            return {'type': 'slideshow', 'slides': images[:10]}
+        
+        # Check for video
+        video_url = media_data.get('play') or media_data.get('download_addr') or media_data.get('video_url')
+        if video_url and isinstance(video_url, str) and len(video_url) > 0:
+            logger.info(f"Found video URL in tikwm response")
             return {'type': 'video', 'url': video_url}
         
+        logger.warning(f"No media found in tikwm response. Data: {str(media_data)[:200]}")
         return None
     except Exception as e:
         logger.error(f"tikwm API failed: {e}")
@@ -1357,38 +1377,71 @@ async def try_musicaldown_api(url: str, feedback) -> dict:
         return None
 
 async def send_tiktok_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, feedback) -> None:
-    """Send TikTok result to user"""
+    """Send TikTok result to user with robust error handling"""
     try:
-        if result['type'] == 'slideshow' and result.get('slides'):
-            slides = result['slides']
-            media = []
+        if not result or not isinstance(result, dict):
+            await feedback.edit_text("[Error] Invalid result format.")
+            return
+        
+        result_type = result.get('type')
+        
+        if result_type == 'slideshow' and result.get('slides'):
+            slides = result.get('slides', [])
+            if not isinstance(slides, list) or len(slides) == 0:
+                await feedback.edit_text("[Error] No valid slides found.")
+                return
             
+            media = []
             for idx, img in enumerate(slides[:10]):
                 try:
+                    img_url = None
                     if isinstance(img, dict):
-                        img_url = img.get('download_addr') or img.get('url')
-                    else:
-                        img_url = str(img)
+                        img_url = img.get('download_addr') or img.get('url') or img.get('pic')
+                    elif isinstance(img, str):
+                        img_url = img
                     
-                    if img_url:
+                    if img_url and isinstance(img_url, str) and len(img_url) > 0:
                         media.append({
                             "type": "photo",
                             "media": img_url,
                             "caption": "[TikTok] Slideshow" if idx == 0 else None,
                         })
-                except:
+                except Exception as img_err:
+                    logger.error(f"Error processing slide {idx}: {img_err}")
                     continue
             
-            if media:
-                await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
-                await feedback.delete()
+            if media and len(media) > 0:
+                try:
+                    await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+                    await feedback.delete()
+                    return
+                except Exception as group_err:
+                    logger.error(f"Failed to send media group: {group_err}")
+                    await feedback.edit_text("[Error] Could not send images. Try downloading as video.")
+                    return
+            else:
+                await feedback.edit_text("[Error] No valid images could be extracted.")
                 return
         
-        elif result['type'] == 'video' and result.get('url'):
-            await feedback.edit_text("[Downloading] TikTok video...")
-            video_response = requests.get(result['url'], timeout=30)
+        elif result_type == 'video' and result.get('url'):
+            video_url = result['url']
+            if not isinstance(video_url, str) or len(video_url) == 0:
+                await feedback.edit_text("[Error] Invalid video URL.")
+                return
             
-            if video_response.status_code == 200:
+            await feedback.edit_text("[Downloading] TikTok video...")
+            try:
+                video_response = requests.get(video_url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+                
+                if video_response.status_code != 200:
+                    logger.error(f"Video download failed with status {video_response.status_code}")
+                    await feedback.edit_text(f"[Error] Download failed (status {video_response.status_code}).")
+                    return
+                
+                if len(video_response.content) == 0:
+                    await feedback.edit_text("[Error] Downloaded video is empty.")
+                    return
+                
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=video_response.content,
@@ -1396,11 +1449,15 @@ async def send_tiktok_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
                 await feedback.delete()
                 return
+            except Exception as vid_err:
+                logger.error(f"Error downloading video: {vid_err}")
+                await feedback.edit_text(f"[Error] Video download failed: {str(vid_err)[:50]}")
+                return
         
-        await feedback.edit_text("[Error] Could not process TikTok content.")
+        await feedback.edit_text("[Error] Unknown result type or missing data.")
     except Exception as e:
-        logger.error(f"Error sending TikTok result: {e}")
-        await feedback.edit_text(f"[Error] Failed to send content: {str(e)[:50]}")
+        logger.error(f"Error in send_tiktok_result: {e}")
+        await feedback.edit_text(f"[Error] Failed to process: {str(e)[:80]}")
 
 # --- END TIKTOK DOWNLOAD WITH MULTIPLE API FALLBACKS ---
 
@@ -1752,7 +1809,36 @@ async def novel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await search_for_novel(update.message, context, query)
 
 async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    """Search for PDFs using multiple sources"""
     feedback = await message.reply_text(f"[Searching] for '{query}'...")
+    
+    # Try Method 1: pdfroom.com
+    results = await try_pdf_source_1_pdfroom(query)
+    if results:
+        await display_pdf_results(feedback, results, "pdfroom")
+        context.user_data['pdf_results'] = results
+        return
+    
+    # Try Method 2: z-library (zlibrary)
+    await feedback.edit_text("[Trying] Alternative PDF source 2...")
+    results = await try_pdf_source_2_archive(query)
+    if results:
+        await display_pdf_results(feedback, results, "archive.org")
+        context.user_data['pdf_results'] = results
+        return
+    
+    # Try Method 3: googledrive/scribd public PDFs
+    await feedback.edit_text("[Trying] Alternative PDF source 3...")
+    results = await try_pdf_source_3_public(query)
+    if results:
+        await display_pdf_results(feedback, results, "public")
+        context.user_data['pdf_results'] = results
+        return
+    
+    await feedback.edit_text("[Error] No PDFs found in any source. Try a different search term.")
+
+async def try_pdf_source_1_pdfroom(query: str) -> list:
+    """Search PDFs on pdfroom.com"""
     try:
         search_url = f"https://www.pdfroom.com/search?q={requests.utils.quote(query)}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -1762,10 +1848,9 @@ async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: s
         results = soup.find_all('div', class_='book-card', limit=5)
         
         if not results or len(results) == 0:
-            await feedback.edit_text("[Info] No PDFs found for that query. Try a different search term.")
-            return
+            return None
         
-        keyboard = []
+        books = []
         for idx, book in enumerate(results):
             try:
                 title_elem = book.find('h5')
@@ -1776,75 +1861,221 @@ async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: s
                 link_elem = book.find('a')
                 if not link_elem or 'href' not in link_elem.attrs:
                     continue
-                    
+                
                 book_page_url = f"https://www.pdfroom.com{link_elem['href']}"
-                button_text = (title[:50] + '...') if len(title) > 50 else title
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
-            except Exception as parse_err:
-                logger.error(f"Error parsing book {idx}: {parse_err}")
+                books.append({'title': title, 'url': book_page_url, 'source': 'pdfroom'})
+            except:
                 continue
         
-        if not keyboard:
-            await feedback.edit_text("[Error] Could not parse search results. Try another search.")
-            return
-            
-        await feedback.edit_text("[Found] Top results. Choose one to download:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return books if len(books) > 0 else None
     except Exception as e:
-        logger.error(f"Novel search failed: {e}")
-        await feedback.edit_text("[Error] Search failed. The PDF service may be temporarily unavailable.")
+        logger.error(f"PDF source 1 (pdfroom) failed: {e}")
+        return None
+
+async def try_pdf_source_2_archive(query: str) -> list:
+    """Search PDFs on archive.org"""
+    try:
+        search_url = f"https://archive.org/advancedsearch.php?q={requests.utils.quote(query)}+AND+mediatype:texts&fl=identifier,title,downloads&output=json&rows=5"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(search_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        
+        docs = data.get('response', {}).get('docs', [])
+        if not docs or len(docs) == 0:
+            return None
+        
+        books = []
+        for doc in docs[:5]:
+            try:
+                identifier = doc.get('identifier')
+                title = doc.get('title', identifier)
+                if identifier:
+                    book_url = f"https://archive.org/details/{identifier}"
+                    books.append({'title': title, 'url': book_url, 'source': 'archive.org', 'identifier': identifier})
+            except:
+                continue
+        
+        return books if len(books) > 0 else None
+    except Exception as e:
+        logger.error(f"PDF source 2 (archive.org) failed: {e}")
+        return None
+
+async def try_pdf_source_3_public(query: str) -> list:
+    """Search public PDF links"""
+    try:
+        # Search Google Scholar for PDFs
+        search_url = f"https://scholar.google.com/scholar?q={requests.utils.quote(query)}&scisbd=1"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(search_url, headers=headers, timeout=20)
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        results = soup.find_all('div', class_='gs_ri', limit=5)
+        
+        if not results or len(results) == 0:
+            return None
+        
+        books = []
+        for result in results[:5]:
+            try:
+                # Look for PDF links
+                pdf_links = result.find_all('a', href=True)
+                for link in pdf_links:
+                    href = link.get('href', '')
+                    if href.endswith('.pdf') or 'pdf' in href.lower():
+                        title = result.find('h3')
+                        if title:
+                            books.append({
+                                'title': title.get_text(strip=True),
+                                'url': href,
+                                'source': 'scholar'
+                            })
+                        break
+            except:
+                continue
+        
+        return books if len(books) > 0 else None
+    except Exception as e:
+        logger.error(f"PDF source 3 (scholar) failed: {e}")
+        return None
+
+async def display_pdf_results(feedback, results: list, source: str) -> None:
+    """Display PDF search results as buttons"""
+    try:
+        if not results or len(results) == 0:
+            await feedback.edit_text("[Error] No results to display.")
+            return
+        
+        keyboard = []
+        for idx, book in enumerate(results[:5]):
+            try:
+                title = book.get('title', 'Unknown')
+                button_text = (title[:45] + '...') if len(title) > 45 else title
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book['url']}:{source}")])
+            except:
+                continue
+        
+        if keyboard:
+            await feedback.edit_text(f"[Found] Results from {source}. Choose one to download:", 
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await feedback.edit_text("[Error] Could not parse results.")
+    except Exception as e:
+        logger.error(f"Error displaying PDF results: {e}")
+        await feedback.edit_text("[Error] Failed to display results.")
 
 async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle PDF download with multiple fallback methods"""
     query = update.callback_query
     await query.answer()
-    book_page_url = query.data.split(":", 1)[1]
-    feedback = await query.edit_message_text("[Starting] Preparing download...")
+    
+    # Parse callback data
+    data_parts = query.data.split(":", 2)
+    if len(data_parts) < 2:
+        await query.edit_message_text("[Error] Invalid download request.")
+        return
+    
+    pdf_url = data_parts[1]
+    source = data_parts[2] if len(data_parts) > 2 else "unknown"
+    
+    feedback = await query.edit_message_text("[Starting] Downloading PDF...")
     
     try:
+        # Method 1: Direct download
+        result = await try_pdf_download_direct(pdf_url, feedback)
+        if result:
+            await send_pdf_to_user(update, context, result, feedback)
+            return
+        
+        # Method 2: Archive.org viewer extraction
+        if source == 'archive.org' and '/details/' in pdf_url:
+            await feedback.edit_text("[Trying] Alternate download method...")
+            result = await try_pdf_download_archive(pdf_url, feedback)
+            if result:
+                await send_pdf_to_user(update, context, result, feedback)
+                return
+        
+        # Method 3: PDFRoom specific
+        if source == 'pdfroom':
+            await feedback.edit_text("[Trying] PDFRoom extraction...")
+            result = await try_pdf_download_pdfroom(pdf_url, feedback)
+            if result:
+                await send_pdf_to_user(update, context, result, feedback)
+                return
+        
+        await feedback.edit_text("[Error] All download methods failed. The PDF may be restricted or removed.")
+    except Exception as e:
+        logger.error(f"PDF download error: {e}")
+        await feedback.edit_text(f"[Error] Download failed: {str(e)[:80]}")
+
+async def try_pdf_download_direct(url: str, feedback) -> dict:
+    """Attempt direct PDF download"""
+    try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(book_page_url, headers=headers, timeout=20)
+        response = requests.get(url, headers=headers, timeout=120)
         response.raise_for_status()
+        
+        if len(response.content) == 0:
+            return None
+        
+        file_size_mb = len(response.content) / (1024 * 1024)
+        if file_size_mb > 50:
+            return None
+        
+        filename = url.split('/')[-1]
+        if not filename.endswith('.pdf'):
+            filename = "document.pdf"
+        
+        return {'content': response.content, 'filename': filename, 'size_mb': file_size_mb}
+    except Exception as e:
+        logger.error(f"Direct PDF download failed: {e}")
+        return None
+
+async def try_pdf_download_archive(url: str, feedback) -> dict:
+    """Attempt PDF extraction from archive.org"""
+    try:
+        # Extract identifier from archive.org URL
+        if '/details/' in url:
+            identifier = url.split('/details/')[1].split('/')[0]
+            pdf_url = f"https://archive.org/download/{identifier}/{identifier}.pdf"
+            return await try_pdf_download_direct(pdf_url, feedback)
+        return None
+    except Exception as e:
+        logger.error(f"Archive.org extraction failed: {e}")
+        return None
+
+async def try_pdf_download_pdfroom(url: str, feedback) -> dict:
+    """Attempt PDF download from pdfroom with page parsing"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # Find download button
         download_btn = soup.find('a', id='download-button')
         if not download_btn or 'href' not in download_btn.attrs:
-            await feedback.edit_text("[Error] Could not find download link on this page. The PDF may have been removed.")
-            return
+            return None
         
         download_link = f"https://www.pdfroom.com{download_btn['href']}"
-        await feedback.edit_text("[Downloading] PDF... this may take a while...")
-        
-        pdf_response = requests.get(download_link, headers=headers, timeout=120)
-        pdf_response.raise_for_status()
-        
-        if len(pdf_response.content) == 0:
-            await feedback.edit_text("[Error] Downloaded file is empty.")
-            return
-        
-        filename = download_link.split('/')[-1] or "document.pdf"
-        file_size_mb = len(pdf_response.content) / (1024 * 1024)
-        
-        if file_size_mb > 50:
-            await feedback.edit_text(f"[Error] File is too large ({file_size_mb:.2f} MB). Download directly from: {download_link}")
-            return
-        
-        await feedback.edit_text(f"[Uploading] PDF ({file_size_mb:.2f} MB)...")
+        return await try_pdf_download_direct(download_link, feedback)
+    except Exception as e:
+        logger.error(f"PDFRoom extraction failed: {e}")
+        return None
+
+async def send_pdf_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, feedback) -> None:
+    """Send PDF to user"""
+    try:
+        await feedback.edit_text(f"[Uploading] PDF ({result['size_mb']:.2f} MB)...")
         await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=pdf_response.content,
-            filename=filename,
+            chat_id=update.effective_chat.id,
+            document=result['content'],
+            filename=result['filename'],
             caption="[PDF] Document"
         )
         await feedback.delete()
     except Exception as e:
-        logger.error(f"Novel download failed: {e}")
-        error_msg = str(e)
-        if '404' in error_msg or 'not found' in error_msg.lower():
-            await feedback.edit_text("[Error] PDF not found. It may have been deleted.")
-        elif 'timeout' in error_msg.lower():
-            await feedback.edit_text("[Error] Download timed out. The file may be too large or the service is slow.")
-        else:
-            await feedback.edit_text(f"[Error] Download failed: {error_msg[:80]}")
+        logger.error(f"Error sending PDF: {e}")
+        await feedback.edit_text(f"[Error] Failed to send PDF: {str(e)[:50]}")
 
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
