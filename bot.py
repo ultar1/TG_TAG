@@ -1229,65 +1229,141 @@ async def handle_platform_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['platform'] = platform
     await query.edit_message_text(f"Send me the {platform} URL.")
 
-# --- TIKTOK IMAGE FIX: New Function using an alternative public API ---
+# --- TIKTOK DOWNLOAD WITH MULTIPLE API FALLBACKS ---
 async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """
-    Downloads images from a TikTok 'photo dump' post using a dedicated API.
-    Falls back to video download if no images are found.
+    Downloads TikTok content using multiple fallback APIs.
+    Tries: 1) tikwm API 2) ttdownloader API 3) musicaldown API 4) yt-dlp
     """
     feedback = await update.message.reply_text("[Processing] TikTok content...")
     
+    # Try API Method 1: tikwm.com
+    result = await try_tikwm_api(url, feedback)
+    if result:
+        await send_tiktok_result(update, context, result, feedback)
+        return
+    
+    # Try API Method 2: ttdownloader.com
+    await feedback.edit_text("[Trying] Alternative API method 2...")
+    result = await try_ttdownloader_api(url, feedback)
+    if result:
+        await send_tiktok_result(update, context, result, feedback)
+        return
+    
+    # Try API Method 3: musicaldown.com
+    await feedback.edit_text("[Trying] Alternative API method 3...")
+    result = await try_musicaldown_api(url, feedback)
+    if result:
+        await send_tiktok_result(update, context, result, feedback)
+        return
+    
+    # Fallback: Use yt-dlp for direct video extraction
+    await feedback.edit_text("[Trying] Direct video extraction...")
     try:
-        # Method 1: Try tikwm.com API which supports both videos and slideshows
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }
+        await download_content_from_url(update, context, url, 'TikTok')
+    except Exception as e:
+        logger.error(f"All TikTok methods failed: {e}")
+        await feedback.edit_text("[Error] TikTok download failed with all methods. The link may be invalid, private, or region-restricted.")
+
+async def try_tikwm_api(url: str, feedback) -> dict:
+    """Attempt download using tikwm.com API"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         
-        # Extract video ID from TikTok URL
         video_id = None
         if '/video/' in url:
             video_id = url.split('/video/')[1].split('?')[0]
         elif 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
-            # Short link - try to extract
-            try:
-                resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
-                if '/video/' in resp.url:
-                    video_id = resp.url.split('/video/')[1].split('?')[0]
-            except:
-                pass
+            resp = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+            if '/video/' in resp.url:
+                video_id = resp.url.split('/video/')[1].split('?')[0]
         
         if not video_id:
-            await feedback.edit_text("[Warning] Could not parse TikTok URL. Attempting general download...")
-            await download_content_from_url(update, context, url, 'TikTok')
-            return
+            return None
         
-        # Try tikwm.com API
         api_url = 'https://tikwm.com/api/feed/video'
-        params = {'video_id': video_id}
-        response = requests.get(api_url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
+        response = requests.get(api_url, headers=headers, params={'video_id': video_id}, timeout=15)
         data = response.json()
         
-        # Check if API returned valid data
         if not data or 'data' not in data:
-            await feedback.edit_text("[Info] No data from API. Downloading as video...")
-            await download_content_from_url(update, context, url, 'TikTok')
-            return
+            return None
         
-        # Check if it's a slideshow/photo dump
-        media_type = data.get('data', {}).get('type')
-        images = data.get('data', {}).get('slides', [])
-        if not images:
-            images = data.get('data', {}).get('images', [])
+        media_data = data.get('data', {})
+        slides = media_data.get('slides', [])
         
-        if media_type == 2 and images and len(images) > 0:
-            # Image slideshow detected
-            await feedback.edit_text(f"[Found] {len(images)} images. Preparing slideshow...")
+        if slides and len(slides) > 0:
+            return {'type': 'slideshow', 'slides': slides[:10]}
+        
+        video_url = media_data.get('play') or media_data.get('download_addr')
+        if video_url:
+            return {'type': 'video', 'url': video_url}
+        
+        return None
+    except Exception as e:
+        logger.error(f"tikwm API failed: {e}")
+        return None
+
+async def try_ttdownloader_api(url: str, feedback) -> dict:
+    """Attempt download using ttdownloader.com API"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        api_url = 'https://ttdownloader.com/api/download'
+        payload = {'url': url}
+        response = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        data = response.json()
+        
+        if data.get('status') != 'success':
+            return None
+        
+        downloads = data.get('data', {}).get('downloads', [])
+        if downloads and len(downloads) > 0:
+            video_url = downloads[0].get('url')
+            if video_url:
+                return {'type': 'video', 'url': video_url}
+        
+        return None
+    except Exception as e:
+        logger.error(f"ttdownloader API failed: {e}")
+        return None
+
+async def try_musicaldown_api(url: str, feedback) -> dict:
+    """Attempt download using musicaldown.com API"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        api_url = 'https://musicaldown.com/api/download'
+        payload = {'url': url}
+        
+        response = requests.post(api_url, json=payload, headers=headers, timeout=15)
+        data = response.json()
+        
+        if data.get('success') or data.get('status') == 'success':
+            video_url = data.get('video_url') or data.get('download_url')
+            if video_url:
+                return {'type': 'video', 'url': video_url}
             
+            downloads = data.get('downloads', [])
+            if downloads and len(downloads) > 0:
+                video_url = downloads[0].get('url')
+                if video_url:
+                    return {'type': 'video', 'url': video_url}
+        
+        return None
+    except Exception as e:
+        logger.error(f"musicaldown API failed: {e}")
+        return None
+
+async def send_tiktok_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, feedback) -> None:
+    """Send TikTok result to user"""
+    try:
+        if result['type'] == 'slideshow' and result.get('slides'):
+            slides = result['slides']
             media = []
-            caption = "[TikTok] Slideshow"
             
-            for idx, img in enumerate(images[:10]):  # Limit to 10 images
+            for idx, img in enumerate(slides[:10]):
                 try:
                     if isinstance(img, dict):
                         img_url = img.get('download_addr') or img.get('url')
@@ -1298,38 +1374,35 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
                         media.append({
                             "type": "photo",
                             "media": img_url,
-                            "caption": caption if idx == 0 else None,
+                            "caption": "[TikTok] Slideshow" if idx == 0 else None,
                         })
-                except Exception as parse_err:
-                    logger.error(f"Error parsing image {idx}: {parse_err}")
+                except:
                     continue
             
             if media:
-                try:
-                    await context.bot.send_media_group(
-                        chat_id=update.effective_chat.id,
-                        media=media
-                    )
-                    await feedback.delete()
-                    return
-                except Exception as send_err:
-                    logger.error(f"Failed to send media group: {send_err}")
-                    await feedback.edit_text("[Error] Could not send images. Falling back to video download...")
+                await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+                await feedback.delete()
+                return
         
-        # Not a slideshow or extraction failed - fall through to video download
-        logger.info(f"Not a slideshow or images unavailable. Type: {media_type}, Images: {len(images)}")
-        await feedback.edit_text("[Info] No slideshow detected. Downloading as video...")
-        await download_content_from_url(update, context, url, 'TikTok')
+        elif result['type'] == 'video' and result.get('url'):
+            await feedback.edit_text("[Downloading] TikTok video...")
+            video_response = requests.get(result['url'], timeout=30)
+            
+            if video_response.status_code == 200:
+                await context.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=video_response.content,
+                    caption="[TikTok] Video"
+                )
+                await feedback.delete()
+                return
         
+        await feedback.edit_text("[Error] Could not process TikTok content.")
     except Exception as e:
-        logger.error(f"TikTok content extraction error: {e}")
-        await feedback.edit_text("[Error] Could not detect slideshow. Attempting regular video download...")
-        try:
-            await download_content_from_url(update, context, url, 'TikTok')
-        except Exception as fallback_err:
-            logger.error(f"Fallback download also failed: {fallback_err}")
-            await feedback.edit_text(f"[Failed] Download failed. The TikTok link may be invalid, private, or region-restricted.")
-# --- END NEW TIKTOK IMAGE FUNCTION ---
+        logger.error(f"Error sending TikTok result: {e}")
+        await feedback.edit_text(f"[Error] Failed to send content: {str(e)[:50]}")
+
+# --- END TIKTOK DOWNLOAD WITH MULTIPLE API FALLBACKS ---
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
     feedback = await update.message.reply_text(f"Starting download from {platform}...")
@@ -1382,31 +1455,55 @@ async def handle_media_download(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"Download from '{platform}' is not supported or an error occurred.")
 # --- END Router function ---
 
+# --- PINTEREST DOWNLOAD WITH MULTIPLE API FALLBACKS ---
 async def download_pinterest_content(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """
-    Specialized downloader for Pinterest images and videos.
-    Uses requests library and yt-dlp for robust Pinterest download.
+    Downloads Pinterest content using multiple fallback methods.
+    Tries: 1) yt-dlp 2) direct Pinterest API 3) pinterestdownloader 4) manual scraping
     """
     feedback = await update.message.reply_text("[Processing] Pinterest content...")
-    temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
-    os.makedirs(temp_dir)
     
+    # Try Method 1: yt-dlp with Pinterest options
+    await feedback.edit_text("[Trying] Method 1 - yt-dlp...")
+    result = await try_pinterest_ytdlp(url)
+    if result:
+        await send_pinterest_result(update, context, result, feedback)
+        return
+    
+    # Try Method 2: Direct Pinterest API
+    await feedback.edit_text("[Trying] Method 2 - Direct API...")
+    result = await try_pinterest_direct_api(url)
+    if result:
+        await send_pinterest_result(update, context, result, feedback)
+        return
+    
+    # Try Method 3: pinterestdownloader.com
+    await feedback.edit_text("[Trying] Method 3 - Alternative service...")
+    result = await try_pinterest_downloader_service(url)
+    if result:
+        await send_pinterest_result(update, context, result, feedback)
+        return
+    
+    # Try Method 4: Requests-based scraping
+    await feedback.edit_text("[Trying] Method 4 - Manual extraction...")
+    result = await try_pinterest_manual_scrape(url)
+    if result:
+        await send_pinterest_result(update, context, result, feedback)
+        return
+    
+    await feedback.edit_text("[Error] Pinterest download failed. All methods exhausted. The pin may be private, deleted, or region-restricted.")
+
+async def try_pinterest_ytdlp(url: str) -> dict:
+    """Try downloading Pinterest content using yt-dlp"""
     try:
-        # Pinterest direct download approach
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Referer': 'https://www.pinterest.com/'
-        }
+        temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
+        os.makedirs(temp_dir)
         
-        # Try using yt-dlp with Pinterest support
-        await feedback.edit_text("[Info] Downloading from Pinterest... (may take a moment)")
-        
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'ignoreerrors': False,
             'socket_timeout': 30,
             'http_headers': headers,
             'format': 'best',
@@ -1414,68 +1511,170 @@ async def download_pinterest_content(update: Update, context: ContextTypes.DEFAU
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-            except Exception as ydl_err:
-                logger.error(f"yt-dlp Pinterest error: {ydl_err}")
-                raise
+            info = ydl.extract_info(url, download=True)
         
-        # Check if file was downloaded
-        downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files or len(downloaded_files) == 0:
-            await feedback.edit_text("[Error] Download failed: No file found. The pin may be private, deleted, or region-restricted.")
-            return
+        files = os.listdir(temp_dir)
+        if files:
+            file_path = os.path.join(temp_dir, files[0])
+            if os.path.getsize(file_path) > 0:
+                return {'type': 'file', 'path': file_path, 'temp_dir': temp_dir}
         
-        file_path = os.path.join(temp_dir, downloaded_files[0])
-        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            await feedback.edit_text("[Error] Downloaded file is empty or invalid.")
-            return
-        
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        file_ext = os.path.splitext(file_path)[1].lower()
-        
-        # Send appropriate media type
-        if file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
-            await feedback.edit_text(f"[Uploading] Pinterest image ({file_size_mb:.2f} MB)...")
-            with open(file_path, 'rb') as f:
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=f,
-                    caption="[Pinterest] Image"
-                )
-        elif file_ext in ['.mp4', '.webm', '.mov', '.avi']:
-            if file_size_mb > 50:
-                await feedback.edit_text(f"[Error] Video is too large ({file_size_mb:.2f} MB). Telegram limit is 50 MB.")
-                return
-            await feedback.edit_text(f"[Uploading] Pinterest video ({file_size_mb:.2f} MB)...")
-            with open(file_path, 'rb') as f:
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=f,
-                    caption="[Pinterest] Video"
-                )
-        else:
-            await feedback.edit_text(f"[Info] Downloaded file type: {file_ext}. Sending as document...")
-            with open(file_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=os.path.basename(file_path)
-                )
-        
-        await feedback.delete()
-        
-    except Exception as e:
-        logger.error(f"Pinterest download error: {e}")
-        error_msg = str(e)
-        if 'private' in error_msg.lower() or 'restricted' in error_msg.lower():
-            await feedback.edit_text("[Error] This pin is private or restricted.")
-        elif 'not found' in error_msg.lower() or 'deleted' in error_msg.lower():
-            await feedback.edit_text("[Error] This pin was not found or has been deleted.")
-        else:
-            await feedback.edit_text(f"[Error] Pinterest download failed. The pin may be private, restricted, or region-locked.")
-    finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+    except Exception as e:
+        logger.error(f"yt-dlp Pinterest failed: {e}")
+        return None
+
+async def try_pinterest_direct_api(url: str) -> dict:
+    """Try downloading Pinterest content via direct API"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept': 'application/json',
+        }
+        
+        # Extract pin ID from URL
+        if '/pin/' in url:
+            pin_id = url.split('/pin/')[1].split('/')[0]
+        else:
+            return None
+        
+        api_url = f'https://api.pinterest.com/v3/pins/{pin_id}'
+        response = requests.get(api_url, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            return None
+        
+        data = response.json()
+        
+        # Look for image or video
+        image_url = data.get('image', {}).get('original', {}).get('url')
+        if image_url:
+            return {'type': 'url', 'url': image_url, 'media_type': 'image'}
+        
+        video = data.get('videos', {}).get('video', {}).get('videoList', {}).get('V_HLSVARIANT', {}).get('url')
+        if video:
+            return {'type': 'url', 'url': video, 'media_type': 'video'}
+        
+        return None
+    except Exception as e:
+        logger.error(f"Direct Pinterest API failed: {e}")
+        return None
+
+async def try_pinterest_downloader_service(url: str) -> dict:
+    """Try downloading Pinterest content via pinterestdownloader service"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        api_url = 'https://pinterestdownloader.com/download.php'
+        payload = {'url': url}
+        
+        response = requests.post(api_url, data=payload, headers=headers, timeout=15)
+        
+        if 'download' in response.text.lower():
+            # Parse HTML for download links
+            soup = BeautifulSoup(response.content, 'html.parser')
+            links = soup.find_all('a', href=True)
+            
+            for link in links:
+                href = link['href']
+                if 'pcdn' in href or 'pinimg' in href or href.endswith(('.mp4', '.jpg', '.png')):
+                    return {'type': 'url', 'url': href, 'media_type': 'unknown'}
+        
+        return None
+    except Exception as e:
+        logger.error(f"Pinterest downloader service failed: {e}")
+        return None
+
+async def try_pinterest_manual_scrape(url: str) -> dict:
+    """Try scraping Pinterest page for media"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Look for images
+        img_tags = soup.find_all('img', src=True)
+        for img in img_tags:
+            src = img.get('src', '')
+            if 'pinimg' in src or 'pcdn' in src:
+                return {'type': 'url', 'url': src, 'media_type': 'image'}
+        
+        # Look for videos
+        video_tags = soup.find_all('video', src=True)
+        for video in video_tags:
+            src = video.get('src', '')
+            if src:
+                return {'type': 'url', 'url': src, 'media_type': 'video'}
+        
+        # Look for source tags
+        source_tags = soup.find_all('source', src=True)
+        for source in source_tags:
+            src = source.get('src', '')
+            if src and ('pcdn' in src or 'pinimg' in src):
+                return {'type': 'url', 'url': src, 'media_type': 'video'}
+        
+        return None
+    except Exception as e:
+        logger.error(f"Pinterest manual scrape failed: {e}")
+        return None
+
+async def send_pinterest_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, feedback) -> None:
+    """Send Pinterest result to user"""
+    try:
+        if result['type'] == 'file':
+            file_path = result['path']
+            temp_dir = result['temp_dir']
+            file_ext = os.path.splitext(file_path)[1].lower()
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            if file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+                await feedback.edit_text(f"[Uploading] Pinterest image ({file_size_mb:.2f} MB)...")
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=f, caption="[Pinterest] Image")
+            elif file_ext in ['.mp4', '.webm', '.mov', '.avi']:
+                if file_size_mb > 50:
+                    await feedback.edit_text(f"[Error] Video too large ({file_size_mb:.2f} MB). Telegram limit is 50 MB.")
+                    return
+                await feedback.edit_text(f"[Uploading] Pinterest video ({file_size_mb:.2f} MB)...")
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=f, caption="[Pinterest] Video")
+            else:
+                await feedback.edit_text(f"[Uploading] Pinterest file ({file_size_mb:.2f} MB)...")
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=f, filename=os.path.basename(file_path))
+            
+            await feedback.delete()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        elif result['type'] == 'url':
+            media_url = result['url']
+            await feedback.edit_text("[Downloading] from URL...")
+            
+            media_response = requests.get(media_url, timeout=30)
+            if media_response.status_code == 200:
+                media_type = result.get('media_type', 'unknown')
+                
+                if media_type == 'image' or media_url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media_response.content, caption="[Pinterest] Image")
+                elif media_type == 'video' or media_url.lower().endswith(('.mp4', '.webm', '.mov')):
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=media_response.content, caption="[Pinterest] Video")
+                else:
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=media_response.content, filename="pinterest_media")
+                
+                await feedback.delete()
+                return
+        
+        await feedback.edit_text("[Error] Could not process Pinterest content.")
+    except Exception as e:
+        logger.error(f"Error sending Pinterest result: {e}")
+        await feedback.edit_text(f"[Error] Failed to send: {str(e)[:50]}")
+
+# --- END PINTEREST DOWNLOAD WITH MULTIPLE API FALLBACKS ---
 
 async def get_joke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
