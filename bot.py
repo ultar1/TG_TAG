@@ -409,7 +409,7 @@ async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, titl
         if not title:
             await update.message.reply_text("Please provide a movie title. Usage: `/movie The Matrix`")
             return
-    feedback = await update.message.reply_text(f"🔍 Searching for '{title}'...")
+    feedback = await update.message.reply_text(f"[Searching] for '{title}'...")
     try:
         search_url = f"https://api.themoviedb.org/3/search/movie"
         params = {"api_key": TMDB_API_KEY, "query": title}
@@ -430,7 +430,7 @@ async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE, titl
             return
         movie = results[0]
         caption = (
-            f"🎬 *{escape_markdown(movie.get('title', 'N/A'), version=2)} ({movie.get('release_date', '----').split('-')[0]})*\n\n"
+            f"[Movie] *{escape_markdown(movie.get('title', 'N/A'), version=2)} ({movie.get('release_date', '----').split('-')[0]})*\n\n"
             f"⭐ *Rating:* {movie.get('vote_average', 0):.1f}/10\n\n"
             f"_{escape_markdown(movie.get('overview', 'No summary available.'), version=2)}_"
         )
@@ -655,7 +655,7 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
         await update.message.reply_text("Please reply to an image with /animate.")
         return
-    feedback = await update.message.reply_text("🎬 Sending image to animation engine... (this may take 1-2 minutes)")
+    feedback = await update.message.reply_text("[Processing] image to animation engine... (this may take 1-2 minutes)")
     try:
         photo_file = await update.message.reply_to_message.photo[-1].get_file()
         image_bytes = await photo_file.download_as_bytearray()
@@ -689,7 +689,7 @@ async def animate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.send_video(
                     update.effective_chat.id, 
                     video=res.content, 
-                    caption="🎬 Here is your animated video!"
+                    caption="[Animation] Here is your animated video!"
                 )
                 await feedback.delete()
                 return
@@ -721,7 +721,7 @@ async def four_k_upscale_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Please reply to a video with the `/4k` command to upscale it.")
         return
     
-    feedback = await update.message.reply_text("📥 Downloading video...")
+    feedback = await update.message.reply_text("[Downloading] video...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     
@@ -736,7 +736,7 @@ async def four_k_upscale_command(update: Update, context: ContextTypes.DEFAULT_T
         if os.path.getsize(input_path) > 10 * 1024 * 1024:
              await feedback.edit_text("⚠️ The video is quite large. Upscaling may be very slow or fail due to processing limits. Proceeding with caution...")
         
-        await feedback.edit_text("✨ Starting 4K Upscale and Quality Enhancement...")
+        await feedback.edit_text("[Processing] Starting 4K Upscale and Quality Enhancement...")
 
         # --- EFFICIENT FFmpeg COMMAND APPLIED ---
         # Scale to 4K (3840x2160)
@@ -1235,7 +1235,7 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
     Downloads images from a TikTok 'photo dump' post using a dedicated API.
     Falls back to video download if no images are found.
     """
-    feedback = await update.message.reply_text("🎵 Processing TikTok content...")
+    feedback = await update.message.reply_text("[Processing] TikTok content...")
     
     try:
         # Method 1: Try tikwm.com API which supports both videos and slideshows
@@ -1257,7 +1257,7 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
                 pass
         
         if not video_id:
-            await feedback.edit_text("⚠️ Could not parse TikTok URL. Attempting general download...")
+            await feedback.edit_text("[Warning] Could not parse TikTok URL. Attempting general download...")
             await download_content_from_url(update, context, url, 'TikTok')
             return
         
@@ -1268,53 +1268,67 @@ async def download_tiktok_image_post(update: Update, context: ContextTypes.DEFAU
         response.raise_for_status()
         data = response.json()
         
+        # Check if API returned valid data
+        if not data or 'data' not in data:
+            await feedback.edit_text("[Info] No data from API. Downloading as video...")
+            await download_content_from_url(update, context, url, 'TikTok')
+            return
+        
         # Check if it's a slideshow/photo dump
-        if data.get('data', {}).get('type') == 2 or 'slides' in str(data):
+        media_type = data.get('data', {}).get('type')
+        images = data.get('data', {}).get('slides', [])
+        if not images:
+            images = data.get('data', {}).get('images', [])
+        
+        if media_type == 2 and images and len(images) > 0:
             # Image slideshow detected
-            images = data.get('data', {}).get('slides', [])
-            if not images:
-                images = data.get('data', {}).get('images', [])
+            await feedback.edit_text(f"[Found] {len(images)} images. Preparing slideshow...")
             
-            if images:
-                await feedback.edit_text(f"📸 Found {len(images)} images. Preparing slideshow...")
-                
-                media = []
-                caption = f"📱 TikTok Slideshow"
-                
-                for idx, img in enumerate(images[:10]):  # Limit to 10 images
-                    img_url = img.get('download_addr') or img.get('url') if isinstance(img, dict) else img
+            media = []
+            caption = "[TikTok] Slideshow"
+            
+            for idx, img in enumerate(images[:10]):  # Limit to 10 images
+                try:
+                    if isinstance(img, dict):
+                        img_url = img.get('download_addr') or img.get('url')
+                    else:
+                        img_url = str(img)
+                    
                     if img_url:
                         media.append({
                             "type": "photo",
                             "media": img_url,
                             "caption": caption if idx == 0 else None,
                         })
-                
-                if media:
-                    try:
-                        await context.bot.send_media_group(
-                            chat_id=update.effective_chat.id,
-                            media=media
-                        )
-                        await feedback.delete()
-                        return
-                    except Exception as send_err:
-                        logger.error(f"Failed to send media group: {send_err}")
-                        await feedback.edit_text("Could not send images. Falling back to video download...")
+                except Exception as parse_err:
+                    logger.error(f"Error parsing image {idx}: {parse_err}")
+                    continue
+            
+            if media:
+                try:
+                    await context.bot.send_media_group(
+                        chat_id=update.effective_chat.id,
+                        media=media
+                    )
+                    await feedback.delete()
+                    return
+                except Exception as send_err:
+                    logger.error(f"Failed to send media group: {send_err}")
+                    await feedback.edit_text("[Error] Could not send images. Falling back to video download...")
         
         # Not a slideshow or extraction failed - fall through to video download
-        logger.info(f"Not a slideshow or images unavailable. Type: {data.get('data', {}).get('type')}")
-        await feedback.edit_text("No slideshow detected. Downloading as video...")
+        logger.info(f"Not a slideshow or images unavailable. Type: {media_type}, Images: {len(images)}")
+        await feedback.edit_text("[Info] No slideshow detected. Downloading as video...")
         await download_content_from_url(update, context, url, 'TikTok')
         
     except Exception as e:
         logger.error(f"TikTok content extraction error: {e}")
-        await feedback.edit_text("⚠️ Could not detect slideshow. Attempting regular video download...")
+        await feedback.edit_text("[Error] Could not detect slideshow. Attempting regular video download...")
         try:
             await download_content_from_url(update, context, url, 'TikTok')
         except Exception as fallback_err:
             logger.error(f"Fallback download also failed: {fallback_err}")
-            await feedback.edit_text(f"❌ Download failed. The TikTok link may be invalid, private, or region-restricted.")
+            await feedback.edit_text(f"[Failed] Download failed. The TikTok link may be invalid, private, or region-restricted.")
 # --- END NEW TIKTOK IMAGE FUNCTION ---
 
 async def download_content_from_url(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, platform: str) -> None:
@@ -1371,65 +1385,77 @@ async def handle_media_download(update: Update, context: ContextTypes.DEFAULT_TY
 async def download_pinterest_content(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """
     Specialized downloader for Pinterest images and videos.
-    Pinterest blocks direct downloads, so we use yt-dlp with special options.
+    Uses requests library and yt-dlp for robust Pinterest download.
     """
-    feedback = await update.message.reply_text("📌 Processing Pinterest content...")
+    feedback = await update.message.reply_text("[Processing] Pinterest content...")
     temp_dir = os.path.join(DOWNLOAD_DIR, str(uuid.uuid4()))
     os.makedirs(temp_dir)
     
     try:
-        # Pinterest-specific yt_dlp options
-        ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'quiet': False,  # Show output for debugging
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'cookiefile': YTDL_COOKIES_FILE,
-            # Pinterest videos/images
-            'format': 'best/best',
-            'socket_timeout': 30,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
+        # Pinterest direct download approach
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Referer': 'https://www.pinterest.com/'
         }
         
-        await feedback.edit_text("⏳ Downloading from Pinterest... (may take a moment)")
+        # Try using yt-dlp with Pinterest support
+        await feedback.edit_text("[Info] Downloading from Pinterest... (may take a moment)")
+        
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': False,
+            'socket_timeout': 30,
+            'http_headers': headers,
+            'format': 'best',
+            'allow_unplayable_formats': True,
+        }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            try:
+                info = ydl.extract_info(url, download=True)
+            except Exception as ydl_err:
+                logger.error(f"yt-dlp Pinterest error: {ydl_err}")
+                raise
         
+        # Check if file was downloaded
         downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files:
-            await feedback.edit_text("❌ Download failed: No file found. The pin may be private or restricted.")
+        if not downloaded_files or len(downloaded_files) == 0:
+            await feedback.edit_text("[Error] Download failed: No file found. The pin may be private, deleted, or region-restricted.")
             return
         
         file_path = os.path.join(temp_dir, downloaded_files[0])
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            await feedback.edit_text("[Error] Downloaded file is empty or invalid.")
+            return
         
-        # Check if file is an image or video
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         file_ext = os.path.splitext(file_path)[1].lower()
         
-        if file_ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            await feedback.edit_text(f"📸 Sending Pinterest image ({file_size_mb:.2f} MB)...")
+        # Send appropriate media type
+        if file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+            await feedback.edit_text(f"[Uploading] Pinterest image ({file_size_mb:.2f} MB)...")
             with open(file_path, 'rb') as f:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=f,
-                    caption="📌 Pinterest Image"
+                    caption="[Pinterest] Image"
                 )
-        elif file_ext in ['.mp4', '.webm', '.mov']:
+        elif file_ext in ['.mp4', '.webm', '.mov', '.avi']:
             if file_size_mb > 50:
-                await feedback.edit_text(f"❌ Video is too large ({file_size_mb:.2f} MB). Pinterest videos must be under 50 MB.")
+                await feedback.edit_text(f"[Error] Video is too large ({file_size_mb:.2f} MB). Telegram limit is 50 MB.")
                 return
-            await feedback.edit_text(f"🎥 Sending Pinterest video ({file_size_mb:.2f} MB)...")
+            await feedback.edit_text(f"[Uploading] Pinterest video ({file_size_mb:.2f} MB)...")
             with open(file_path, 'rb') as f:
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=f,
-                    caption="📌 Pinterest Video"
+                    caption="[Pinterest] Video"
                 )
         else:
-            await feedback.edit_text(f"Downloaded file type: {file_ext}. Sending as document...")
+            await feedback.edit_text(f"[Info] Downloaded file type: {file_ext}. Sending as document...")
             with open(file_path, 'rb') as f:
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id,
@@ -1441,7 +1467,13 @@ async def download_pinterest_content(update: Update, context: ContextTypes.DEFAU
         
     except Exception as e:
         logger.error(f"Pinterest download error: {e}")
-        await feedback.edit_text(f"❌ Pinterest download failed: {str(e)[:100]}. The pin may be private, restricted, or region-locked.")
+        error_msg = str(e)
+        if 'private' in error_msg.lower() or 'restricted' in error_msg.lower():
+            await feedback.edit_text("[Error] This pin is private or restricted.")
+        elif 'not found' in error_msg.lower() or 'deleted' in error_msg.lower():
+            await feedback.edit_text("[Error] This pin was not found or has been deleted.")
+        else:
+            await feedback.edit_text(f"[Error] Pinterest download failed. The pin may be private, restricted, or region-locked.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1521,56 +1553,99 @@ async def novel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await search_for_novel(update.message, context, query)
 
 async def search_for_novel(message, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    feedback = await message.reply_text(f"📚 Searching for '{query}'...")
+    feedback = await message.reply_text(f"[Searching] for '{query}'...")
     try:
         search_url = f"https://www.pdfroom.com/search?q={requests.utils.quote(query)}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(search_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         results = soup.find_all('div', class_='book-card', limit=5)
-        if not results:
-            await feedback.edit_text("Sorry, I couldn't find any novels matching that title.")
+        
+        if not results or len(results) == 0:
+            await feedback.edit_text("[Info] No PDFs found for that query. Try a different search term.")
             return
+        
         keyboard = []
-        for book in results:
-            title = book.find('h5').get_text(strip=True)
-            book_page_url = f"https://www.pdfroom.com{book.find('a')['href']}"
-            button_text = (title[:60] + '..') if len(title) > 60 else title
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
-        await feedback.edit_text("Top results. Choose one to download:", reply_markup=InlineKeyboardMarkup(keyboard))
+        for idx, book in enumerate(results):
+            try:
+                title_elem = book.find('h5')
+                if not title_elem:
+                    continue
+                title = title_elem.get_text(strip=True)
+                
+                link_elem = book.find('a')
+                if not link_elem or 'href' not in link_elem.attrs:
+                    continue
+                    
+                book_page_url = f"https://www.pdfroom.com{link_elem['href']}"
+                button_text = (title[:50] + '...') if len(title) > 50 else title
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"novel_dl:{book_page_url}")])
+            except Exception as parse_err:
+                logger.error(f"Error parsing book {idx}: {parse_err}")
+                continue
+        
+        if not keyboard:
+            await feedback.edit_text("[Error] Could not parse search results. Try another search.")
+            return
+            
+        await feedback.edit_text("[Found] Top results. Choose one to download:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Novel search failed: {e}")
-        await feedback.edit_text("An error occurred during the search.")
+        await feedback.edit_text("[Error] Search failed. The PDF service may be temporarily unavailable.")
 
 async def handle_novel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     book_page_url = query.data.split(":", 1)[1]
-    feedback = await query.edit_message_text("📥 Preparing download...")
+    feedback = await query.edit_message_text("[Starting] Preparing download...")
+    
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(book_page_url, headers=headers, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        download_link = f"https://www.pdfroom.com{soup.find('a', id='download-button')['href']}"
-        await feedback.edit_text("Downloading PDF... this may take a while.")
+        
+        # Find download button
+        download_btn = soup.find('a', id='download-button')
+        if not download_btn or 'href' not in download_btn.attrs:
+            await feedback.edit_text("[Error] Could not find download link on this page. The PDF may have been removed.")
+            return
+        
+        download_link = f"https://www.pdfroom.com{download_btn['href']}"
+        await feedback.edit_text("[Downloading] PDF... this may take a while...")
+        
         pdf_response = requests.get(download_link, headers=headers, timeout=120)
         pdf_response.raise_for_status()
-        filename = download_link.split('/')[-1] or "novel.pdf"
-        if len(pdf_response.content) > 50 * 1024 * 1024:
-            await feedback.edit_text(f"File is too large for Telegram. Download directly: {download_link}")
+        
+        if len(pdf_response.content) == 0:
+            await feedback.edit_text("[Error] Downloaded file is empty.")
             return
+        
+        filename = download_link.split('/')[-1] or "document.pdf"
+        file_size_mb = len(pdf_response.content) / (1024 * 1024)
+        
+        if file_size_mb > 50:
+            await feedback.edit_text(f"[Error] File is too large ({file_size_mb:.2f} MB). Download directly from: {download_link}")
+            return
+        
+        await feedback.edit_text(f"[Uploading] PDF ({file_size_mb:.2f} MB)...")
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_response.content,
             filename=filename,
-            caption="Here is your novel!"
+            caption="[PDF] Document"
         )
         await feedback.delete()
     except Exception as e:
         logger.error(f"Novel download failed: {e}")
-        await feedback.edit_text(f"An error occurred during download: {e}")
+        error_msg = str(e)
+        if '404' in error_msg or 'not found' in error_msg.lower():
+            await feedback.edit_text("[Error] PDF not found. It may have been deleted.")
+        elif 'timeout' in error_msg.lower():
+            await feedback.edit_text("[Error] Download timed out. The file may be too large or the service is slow.")
+        else:
+            await feedback.edit_text(f"[Error] Download failed: {error_msg[:80]}")
 
 async def prompt_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, message: str, event: str) -> None:
     await save_user_to_db(update, context, event_type=event)
